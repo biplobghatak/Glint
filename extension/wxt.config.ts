@@ -8,6 +8,7 @@ export default defineConfig({
   manifest: {
     name: "Glint",
     description: "Score LinkedIn leads against your ICP as you browse.",
+    action: { default_title: "Glint" },
     permissions: ["storage"],
     host_permissions: ["*://*.linkedin.com/*"],
   },
