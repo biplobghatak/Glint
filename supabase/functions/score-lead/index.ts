@@ -67,7 +67,7 @@ Deno.serve(async (req: Request) => {
 
   const jsonHeaders = { ...corsHeaders, "content-type": "application/json" }
 
-  let body: { profile_data?: ProfileData; user_id?: string }
+  let body: { profile_data?: ProfileData; device_token?: string }
   try {
     body = await req.json()
   } catch {
@@ -77,8 +77,8 @@ Deno.serve(async (req: Request) => {
     })
   }
 
-  const { profile_data, user_id } = body
-  if (!user_id || !profile_data) {
+  const { profile_data, device_token } = body
+  if (!device_token || !profile_data) {
     return new Response(JSON.stringify({ error: "missing_fields" }), {
       status: 400,
       headers: jsonHeaders,
@@ -89,6 +89,20 @@ Deno.serve(async (req: Request) => {
     Deno.env.get("SUPABASE_URL")!,
     Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
   )
+
+  const { data: pairing } = await supabase
+    .from("extension_pairings")
+    .select("user_id")
+    .eq("device_token", device_token)
+    .maybeSingle()
+
+  if (!pairing) {
+    return new Response(JSON.stringify({ error: "unpaired" }), {
+      status: 401,
+      headers: jsonHeaders,
+    })
+  }
+  const user_id = pairing.user_id
 
   const { data: icp, error: icpError } = await supabase
     .from("icps")
