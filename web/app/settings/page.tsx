@@ -1,5 +1,6 @@
 import { redirect } from "next/navigation"
 import { createClient } from "@/lib/supabase/server"
+import { AppNav } from "@/components/app-nav"
 import { PairingPanel } from "./pairing-panel"
 
 export default async function SettingsPage() {
@@ -12,5 +13,10 @@ export default async function SettingsPage() {
     redirect("/login")
   }
 
-  return <PairingPanel />
+  return (
+    <>
+      <AppNav />
+      <PairingPanel />
+    </>
+  )
 }
