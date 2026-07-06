@@ -1,5 +1,6 @@
+import { callLLMJson } from "../_shared/llm.ts"
+
 const MIN_CONTENT_LENGTH = 200
-const CLAUDE_MODEL = "claude-opus-4-8"
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -36,53 +37,29 @@ type IcpResult = {
   raw_summary: string
 }
 
-async function generateIcp(content: string): Promise<IcpResult> {
-  const response = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "x-api-key": Deno.env.get("ANTHROPIC_API_KEY")!,
-      "anthropic-version": "2023-06-01",
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({
-      model: CLAUDE_MODEL,
-      max_tokens: 1024,
-      output_config: {
-        format: {
-          type: "json_schema",
-          schema: {
-            type: "object",
-            properties: {
-              target_roles: { type: "array", items: { type: "string" } },
-              company_types: { type: "array", items: { type: "string" } },
-              pain_points: { type: "array", items: { type: "string" } },
-              raw_summary: { type: "string" },
-            },
-            required: [
-              "target_roles",
-              "company_types",
-              "pain_points",
-              "raw_summary",
-            ],
-            additionalProperties: false,
-          },
-        },
+const ICP_SCHEMA = {
+  type: "object",
+  properties: {
+    target_roles: { type: "array", items: { type: "string" } },
+    company_types: { type: "array", items: { type: "string" } },
+    pain_points: { type: "array", items: { type: "string" } },
+    raw_summary: { type: "string" },
+  },
+  required: ["target_roles", "company_types", "pain_points", "raw_summary"],
+  additionalProperties: false,
+}
+
+function generateIcp(content: string): Promise<IcpResult> {
+  return callLLMJson<IcpResult>({
+    schema: ICP_SCHEMA,
+    schemaName: "icp",
+    messages: [
+      {
+        role: "user",
+        content: `Based on this website/product content, identify the ideal customer profile (ICP): target roles who'd buy this, the types of companies that fit, their pain points this product solves, and a short summary.\n\nContent:\n${content}`,
       },
-      messages: [
-        {
-          role: "user",
-          content: `Based on this website/product content, identify the ideal customer profile (ICP): target roles who'd buy this, the types of companies that fit, their pain points this product solves, and a short summary.\n\nContent:\n${content}`,
-        },
-      ],
-    }),
+    ],
   })
-
-  const data = await response.json()
-  if (!response.ok || data.stop_reason === "refusal") {
-    throw new Error(`Claude request failed: ${JSON.stringify(data)}`)
-  }
-
-  return JSON.parse(data.content[0].text) as IcpResult
 }
 
 Deno.serve(async (req: Request) => {
