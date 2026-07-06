@@ -20,5 +20,5 @@ export default async function InboxPage() {
     .eq("user_id", user.id)
     .order("match_score", { ascending: false })
 
-  return <LeadInbox initialLeads={(leads ?? []) as Lead[]} />
+  return <LeadInbox initialLeads={(leads ?? []) as Lead[]} userId={user.id} />
 }

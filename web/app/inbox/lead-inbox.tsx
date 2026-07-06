@@ -1,6 +1,6 @@
 "use client"
 
-import { useMemo, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import { createClient } from "@/lib/supabase/client"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -52,10 +52,42 @@ function scoreVariant(
   return "outline"
 }
 
-export function LeadInbox({ initialLeads }: { initialLeads: Lead[] }) {
+export function LeadInbox({
+  initialLeads,
+  userId,
+}: {
+  initialLeads: Lead[]
+  userId: string
+}) {
   const supabase = createClient()
   const [leads, setLeads] = useState<Lead[]>(initialLeads)
   const [filter, setFilter] = useState<ScoreFilter>("all")
+
+  useEffect(() => {
+    const channel = supabase
+      .channel("leads-inbox")
+      .on(
+        "postgres_changes",
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "leads",
+          filter: `user_id=eq.${userId}`,
+        },
+        (payload) => {
+          setLeads((cur) => {
+            const lead = payload.new as Lead
+            if (cur.some((l) => l.id === lead.id)) return cur
+            return [lead, ...cur]
+          })
+        }
+      )
+      .subscribe()
+
+    return () => {
+      supabase.removeChannel(channel)
+    }
+  }, [supabase, userId])
 
   const visible = useMemo(
     () =>
