@@ -423,3 +423,10 @@ entrypoint = "./functions/score-lead/index.ts"
 # Specifies static files to be bundled with the function. Supports glob patterns.
 # For example, if you want to serve static HTML pages in your function:
 # static_files = [ "./functions/score-lead/*.html" ]
+
+# create-pairing is called by the signed-in web app, so it keeps default
+# JWT verification. pair-extension is called by the extension (no Supabase
+# session), so JWT verification is disabled and it validates the code itself.
+[functions.pair-extension]
+enabled = true
+verify_jwt = false
