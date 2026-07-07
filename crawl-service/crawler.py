@@ -1,5 +1,7 @@
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CacheMode, CrawlerRunConfig
 
+from urlguard import UnsafeUrlError, assert_public_url
+
 
 class ScrapeError(Exception):
     """Raised when a page cannot be rendered or yields no usable content."""
@@ -8,9 +10,14 @@ class ScrapeError(Exception):
 async def scrape_homepage(url: str, timeout_s: float = 25.0) -> str:
     """Render `url`'s homepage headlessly and return cleaned markdown.
 
-    Homepage only — no link following. Raises ScrapeError on navigation
-    failure, render timeout, or empty extraction.
+    Homepage only — no link following. Raises ScrapeError on an unsafe URL,
+    navigation failure, render timeout, or empty extraction.
     """
+    try:
+        assert_public_url(url)
+    except UnsafeUrlError as exc:
+        raise ScrapeError(str(exc)) from exc
+
     browser_config = BrowserConfig(headless=True, verbose=False)
     run_config = CrawlerRunConfig(
         cache_mode=CacheMode.BYPASS,

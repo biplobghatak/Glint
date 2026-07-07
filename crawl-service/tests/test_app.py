@@ -10,6 +10,7 @@ def test_endpoint_rejects_missing_or_wrong_secret(monkeypatch):
     monkeypatch.setattr(app_module, "CRAWL_SECRET", "topsecret")
     r_missing = client.post("/scrape", json={"url": "https://example.com"})
     assert r_missing.status_code == 401
+    assert r_missing.json() == {"error": "invalid secret"}
     r_wrong = client.post(
         "/scrape",
         json={"url": "https://example.com"},

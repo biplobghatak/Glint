@@ -30,8 +30,10 @@ const LONG_CONTENT = "Acme helps revenue teams. ".repeat(30) // > 200 chars
 
 Deno.test("sufficient scraped content -> returns ICP", async () => {
   setEnv()
-  const restore = stubFetch(async (url) => {
+  let scrapeInit: RequestInit | undefined
+  const restore = stubFetch(async (url, init) => {
     if (url.endsWith("/scrape")) {
+      scrapeInit = init
       return new Response(JSON.stringify({ content: LONG_CONTENT }), { status: 200 })
     }
     // LLM call (Bynara /chat/completions)
@@ -57,6 +59,10 @@ Deno.test("sufficient scraped content -> returns ICP", async () => {
     assertEquals(res.status, 200)
     assert(!("needs_manual_input" in data))
     assertEquals(data.target_roles, ["VP Sales"])
+    // The scrape call carries the shared-secret header and JSON content type.
+    const headers = scrapeInit?.headers as Record<string, string>
+    assertEquals(headers["X-Crawl-Secret"], "s")
+    assertEquals(headers["Content-Type"], "application/json")
   } finally {
     restore()
   }
@@ -78,6 +84,17 @@ Deno.test("crawl-service failure -> needs_manual_input", async () => {
   setEnv()
   const restore = stubFetch(async () =>
     new Response(JSON.stringify({ error: "boom" }), { status: 502 }))
+  try {
+    const res = await handler(makeReq({ website_url: "https://example.com" }))
+    assertEquals(await res.json(), { needs_manual_input: true })
+  } finally {
+    restore()
+  }
+})
+
+Deno.test("crawl-service throws (timeout/network) -> needs_manual_input", async () => {
+  setEnv()
+  const restore = stubFetch(() => Promise.reject(new Error("timeout")))
   try {
     const res = await handler(makeReq({ website_url: "https://example.com" }))
     assertEquals(await res.json(), { needs_manual_input: true })
