@@ -1,10 +1,16 @@
 import { isLinkedIn } from "@/lib/linkedin"
-import { parseQuery, buildSearchUrl, UnpairedError, NoIcpError } from "@/lib/query"
+import { parseQuery, buildSearchUrl, UnpairedError, NoIcpError, QueryServiceError } from "@/lib/query"
 import { getRunState, setRunState, clearRunState } from "@/lib/run"
 import type { RuntimeMessage } from "@/lib/messages"
 
 const DEFAULT_MAX_LEADS = 100
 const DEFAULT_MAX_MINUTES = 20
+
+// Thrown when the run state was persisted successfully but navigating the
+// tab to the search URL failed (blocked/disallowed navigation, discarded
+// tab, restricted page, etc). Kept distinct from parse/transport failures so
+// startRun's catch can report an accurate, non-misleading message.
+class NavigationError extends Error {}
 
 async function syncPanelForTab(tabId: number, url: string | undefined) {
   try {
@@ -27,6 +33,9 @@ async function startRun(query: string, tabId: number) {
   try {
     const parsed = await parseQuery(query)
     const url = buildSearchUrl(parsed)
+    // Persist run state *before* navigating — the future content script
+    // reads glint_run on load, so it must already be active by the time
+    // the tab lands on the search results page.
     await setRunState({
       active: true,
       tabId,
@@ -36,14 +45,29 @@ async function startRun(query: string, tabId: number) {
       maxLeads: DEFAULT_MAX_LEADS,
       maxMinutes: DEFAULT_MAX_MINUTES,
     })
-    await chrome.tabs.update(tabId, { url })
+    try {
+      await chrome.tabs.update(tabId, { url })
+    } catch (navErr) {
+      // Navigation failed after we already marked the run active — don't
+      // strand glint_run at active:true with nothing driving it.
+      await clearRunState()
+      throw new NavigationError(
+        navErr instanceof Error ? navErr.message : "tabs.update failed"
+      )
+    }
   } catch (err) {
     const error =
       err instanceof UnpairedError
         ? "Not paired. Open the popup and pair first."
         : err instanceof NoIcpError
           ? "No ICP found. Complete onboarding in the web app first."
-          : "Could not parse your request. Try again."
+          : err instanceof NavigationError
+            ? "Could not open LinkedIn in this tab. Try again."
+            : err instanceof QueryServiceError
+              ? "Search service is unavailable right now. Try again in a moment."
+              : err instanceof TypeError
+                ? "Network error — check your connection and try again."
+                : "Could not parse your request. Try again."
     sendMessage({ type: "RUN_ERROR", error })
   }
 }
@@ -84,7 +108,14 @@ export default defineBackground(() => {
     chrome.runtime.onMessage.addListener((message: RuntimeMessage) => {
       if (message.type === "START_RUN") {
         chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
-          if (tab?.id) startRun(message.query, tab.id)
+          if (tab?.id !== undefined && isLinkedIn(tab.url)) {
+            startRun(message.query, tab.id)
+          } else {
+            sendMessage({
+              type: "RUN_ERROR",
+              error: "Open a LinkedIn tab to start a search.",
+            })
+          }
         })
       } else if (message.type === "STOP_RUN") {
         clearRunState()

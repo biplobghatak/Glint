@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react"
 import { getDeviceToken } from "@/lib/pairing"
+import { getRunState } from "@/lib/run"
 import type { RuntimeMessage } from "@/lib/messages"
 
 export default function App() {
@@ -11,7 +12,19 @@ export default function App() {
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
-    getDeviceToken().then((t) => setPaired(t !== null))
+    // The side panel document is unloaded/remounted whenever Chrome disables
+    // it for the active tab (e.g. the user switches to a non-LinkedIn tab
+    // and back), so on every mount we must rehydrate from glint_run — not
+    // just re-check pairing — or an in-flight run becomes invisible/
+    // unstoppable and Start would fire a second, overlapping run.
+    Promise.all([getDeviceToken(), getRunState()]).then(([token, run]) => {
+      if (run?.active) {
+        setRunning(true)
+        setQuery(run.query)
+        setLeadCount(run.leadCount)
+      }
+      setPaired(token !== null)
+    })
   }, [])
 
   useEffect(() => {
@@ -33,11 +46,13 @@ export default function App() {
 
   function handleStart(e: FormEvent) {
     e.preventDefault()
+    const trimmed = query.trim()
+    if (!trimmed) return
     setError(null)
     setStatus(null)
     setLeadCount(0)
     setRunning(true)
-    chrome.runtime.sendMessage({ type: "START_RUN", query: query.trim() })
+    chrome.runtime.sendMessage({ type: "START_RUN", query: trimmed })
   }
 
   function handleStop() {
@@ -72,6 +87,7 @@ export default function App() {
               <button
                 type="submit"
                 className="rounded-md bg-black px-3 py-1.5 text-sm text-white disabled:opacity-50"
+                disabled={query.trim().length === 0}
               >
                 Start
               </button>

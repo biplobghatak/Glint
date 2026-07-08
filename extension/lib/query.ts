@@ -6,6 +6,7 @@ export type ParsedQuery = { title: string; keywords: string; location: string }
 
 export class UnpairedError extends Error {}
 export class NoIcpError extends Error {}
+export class QueryServiceError extends Error {}
 
 export async function parseQuery(query: string): Promise<ParsedQuery> {
   const device_token = await getDeviceToken()
@@ -25,7 +26,7 @@ export async function parseQuery(query: string): Promise<ParsedQuery> {
 
   if (res.status === 401) throw new UnpairedError("unpaired")
   if (res.status === 404) throw new NoIcpError("no_icp")
-  if (!res.ok) throw new Error(`parse-search-query failed (${res.status})`)
+  if (!res.ok) throw new QueryServiceError(`parse-search-query failed (${res.status})`)
 
   return (await res.json()) as ParsedQuery
 }
