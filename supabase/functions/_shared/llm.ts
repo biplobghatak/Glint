@@ -11,6 +11,7 @@ export async function callLLMJson<T>(opts: {
   schemaName: string
   maxTokens?: number
   model?: string
+  reasoning?: boolean
 }): Promise<T> {
   const res = await fetch(`${OPENROUTER_BASE_URL}/chat/completions`, {
     method: "POST",
@@ -22,6 +23,9 @@ export async function callLLMJson<T>(opts: {
       model: opts.model ?? DEFAULT_MODEL,
       max_tokens: opts.maxTokens ?? 1024,
       messages: opts.messages,
+      // Reasoning models spend max_tokens on chain-of-thought before emitting
+      // content, which truncates the JSON and leaks deliberation into fields.
+      reasoning: { enabled: opts.reasoning ?? false },
       response_format: {
         type: "json_schema",
         json_schema: {
