@@ -1,4 +1,4 @@
-import { Geist, Geist_Mono, Inter, Manrope } from "next/font/google"
+import { Geist_Mono, Inter, Manrope } from "next/font/google"
 
 import "./globals.css"
 import { ThemeProvider } from "@/components/theme-provider"
