@@ -1,6 +1,5 @@
 import { redirect } from "next/navigation"
 import { createClient } from "@/lib/supabase/server"
-import { AppNav } from "@/components/app-nav"
 import { LeadInbox, type Lead } from "./lead-inbox"
 
 export default async function InboxPage() {
@@ -21,10 +20,5 @@ export default async function InboxPage() {
     .eq("user_id", user.id)
     .order("match_score", { ascending: false })
 
-  return (
-    <>
-      <AppNav />
-      <LeadInbox initialLeads={(leads ?? []) as Lead[]} userId={user.id} />
-    </>
-  )
+  return <LeadInbox initialLeads={(leads ?? []) as Lead[]} userId={user.id} />
 }
