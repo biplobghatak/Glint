@@ -9,3 +9,6 @@
 
 # Edge Function secrets
 functions/**/.env
+
+# Deno lockfiles (not tracked for any Edge Function)
+functions/**/deno.lock
