@@ -9,7 +9,8 @@ export default defineConfig({
     name: "Glint",
     description: "Score LinkedIn leads against your ICP as you browse.",
     action: { default_title: "Glint" },
-    permissions: ["storage"],
+    permissions: ["storage", "sidePanel", "tabs"],
     host_permissions: ["*://*.linkedin.com/*"],
+    side_panel: { default_path: "sidepanel.html" },
   },
 })
