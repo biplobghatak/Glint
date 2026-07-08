@@ -1,6 +1,7 @@
-const OPENAI_BASE_URL =
-  Deno.env.get("OPENAI_BASE_URL") ?? "https://api.openai.com/v1"
-const DEFAULT_MODEL = Deno.env.get("LLM_MODEL") ?? "gpt-4o-mini"
+const OPENROUTER_BASE_URL =
+  Deno.env.get("OPENROUTER_BASE_URL") ?? "https://openrouter.ai/api/v1"
+const DEFAULT_MODEL =
+  Deno.env.get("LLM_MODEL") ?? "deepseek/deepseek-v4-flash"
 
 export type JsonSchema = Record<string, unknown>
 
@@ -11,10 +12,10 @@ export async function callLLMJson<T>(opts: {
   maxTokens?: number
   model?: string
 }): Promise<T> {
-  const res = await fetch(`${OPENAI_BASE_URL}/chat/completions`, {
+  const res = await fetch(`${OPENROUTER_BASE_URL}/chat/completions`, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${Deno.env.get("OPENAI_API_KEY")!}`,
+      Authorization: `Bearer ${Deno.env.get("OPENROUTER_API_KEY")!}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
