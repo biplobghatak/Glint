@@ -25,10 +25,7 @@ export function PairingPanel() {
   }, [supabase])
 
   useEffect(() => {
-    const load = async () => {
-      await loadPairings()
-    }
-    load()
+    loadPairings()
   }, [loadPairings])
 
   async function generate() {
