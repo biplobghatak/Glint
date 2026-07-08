@@ -22,5 +22,5 @@ export default async function Home() {
     redirect("/onboarding")
   }
 
-  redirect("/inbox")
+  redirect("/dashboard")
 }
