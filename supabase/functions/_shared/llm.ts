@@ -1,6 +1,6 @@
-const BYNARA_BASE_URL =
-  Deno.env.get("BYNARA_BASE_URL") ?? "https://router.bynara.id/v1"
-const DEFAULT_MODEL = Deno.env.get("LLM_MODEL") ?? "claude-opus-4.8"
+const OPENAI_BASE_URL =
+  Deno.env.get("OPENAI_BASE_URL") ?? "https://api.openai.com/v1"
+const DEFAULT_MODEL = Deno.env.get("LLM_MODEL") ?? "gpt-4o-mini"
 
 export type JsonSchema = Record<string, unknown>
 
@@ -11,10 +11,10 @@ export async function callLLMJson<T>(opts: {
   maxTokens?: number
   model?: string
 }): Promise<T> {
-  const res = await fetch(`${BYNARA_BASE_URL}/chat/completions`, {
+  const res = await fetch(`${OPENAI_BASE_URL}/chat/completions`, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${Deno.env.get("BYNARA_API_KEY")!}`,
+      Authorization: `Bearer ${Deno.env.get("OPENAI_API_KEY")!}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
