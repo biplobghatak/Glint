@@ -3,6 +3,14 @@
 import { useCallback, useEffect, useState } from "react"
 import { createClient } from "@/lib/supabase/client"
 import { Button } from "@/components/ui/button"
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card"
+import { PageHeader } from "@/components/app-shell/page-header"
 
 type Pairing = {
   id: string
@@ -46,47 +54,58 @@ export function PairingPanel() {
   }
 
   return (
-    <div className="mx-auto flex max-w-md flex-col gap-6 p-6">
-      <div className="flex flex-col gap-2">
-        <h1 className="text-lg font-medium">Connect extension</h1>
-        <p className="text-muted-foreground text-sm">
-          Generate a code, then paste it into the Glint extension popup. Codes
-          expire in 10 minutes.
-        </p>
-        <Button onClick={generate} disabled={loading} className="self-start">
-          {loading ? "Generating..." : "Generate pairing code"}
-        </Button>
-        {code && (
-          <p className="rounded-md border p-3 text-center font-mono text-2xl tracking-widest">
-            {code}
-          </p>
-        )}
-      </div>
+    <>
+      <PageHeader title="Settings" />
+      <div className="flex flex-col gap-4 p-4">
+        <Card>
+          <CardHeader>
+            <CardTitle>Connect extension</CardTitle>
+            <CardDescription>
+              Generate a code, then paste it into the Glint extension popup.
+              Codes expire in 10 minutes.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-3">
+            <Button onClick={generate} disabled={loading} className="self-start">
+              {loading ? "Generating..." : "Generate pairing code"}
+            </Button>
+            {code && (
+              <p className="border border-border p-3 text-center font-mono text-2xl tracking-widest">
+                {code}
+              </p>
+            )}
+          </CardContent>
+        </Card>
 
-      <div className="flex flex-col gap-2">
-        <h2 className="text-sm font-medium">Paired devices</h2>
-        {pairings.length === 0 ? (
-          <p className="text-muted-foreground text-sm">No pairings yet.</p>
-        ) : (
-          <ul className="flex flex-col gap-2">
-            {pairings.map((p) => (
-              <li
-                key={p.id}
-                className="flex items-center justify-between rounded-md border p-3 text-sm"
-              >
-                <span>
-                  {p.paired_at
-                    ? `Paired ${new Date(p.paired_at).toLocaleString()}`
-                    : "Pending — code not yet used"}
-                </span>
-                <Button size="sm" variant="outline" onClick={() => revoke(p.id)}>
-                  Revoke
-                </Button>
-              </li>
-            ))}
-          </ul>
-        )}
+        <Card>
+          <CardHeader>
+            <CardTitle>Paired devices</CardTitle>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-2">
+            {pairings.length === 0 ? (
+              <p className="text-sm text-muted-foreground">No pairings yet.</p>
+            ) : (
+              <ul className="flex flex-col gap-2">
+                {pairings.map((p) => (
+                  <li
+                    key={p.id}
+                    className="flex items-center justify-between border border-border p-3 text-sm"
+                  >
+                    <span>
+                      {p.paired_at
+                        ? `Paired ${new Date(p.paired_at).toLocaleString()}`
+                        : "Pending — code not yet used"}
+                    </span>
+                    <Button size="sm" variant="outline" onClick={() => revoke(p.id)}>
+                      Revoke
+                    </Button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </CardContent>
+        </Card>
       </div>
-    </div>
+    </>
   )
 }
