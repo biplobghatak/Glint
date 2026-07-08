@@ -1,6 +1,4 @@
-function isLinkedIn(url: string | undefined): boolean {
-  return !!url && /^https:\/\/([a-z0-9-]+\.)?linkedin\.com\//.test(url)
-}
+import { isLinkedIn } from "@/lib/linkedin"
 
 async function syncPanelForTab(tabId: number, url: string | undefined) {
   try {
@@ -9,21 +7,38 @@ async function syncPanelForTab(tabId: number, url: string | undefined) {
       path: "sidepanel.html",
       enabled: isLinkedIn(url),
     })
-  } catch {
-    // tab may have closed mid-update; ignore
+  } catch (err) {
+    // tab may have closed mid-update; ignore, but keep it visible
+    console.debug("Glint: syncPanelForTab failed", tabId, err)
   }
 }
 
 export default defineBackground(() => {
-  chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {})
+  if (import.meta.env.BROWSER === "chrome") {
+    // One-time sync for tabs that were already open when the extension
+    // installed/reloaded — onUpdated/onActivated only fire on future
+    // transitions, so without this, already-open tabs stay "enabled
+    // everywhere" (the side_panel.default_path default) until the user
+    // navigates or switches tabs.
+    chrome.tabs.query({}, (tabs) => {
+      for (const tab of tabs) {
+        if (tab.id !== undefined) {
+          syncPanelForTab(tab.id, tab.url)
+        }
+      }
+    })
 
-  chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-    if (changeInfo.url !== undefined || changeInfo.status === "complete") {
-      syncPanelForTab(tabId, tab.url)
-    }
-  })
+    chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+      if (changeInfo.url !== undefined || changeInfo.status === "complete") {
+        syncPanelForTab(tabId, tab.url)
+      }
+    })
 
-  chrome.tabs.onActivated.addListener(({ tabId }) => {
-    chrome.tabs.get(tabId, (tab) => syncPanelForTab(tabId, tab.url))
-  })
+    chrome.tabs.onActivated.addListener(({ tabId }) => {
+      chrome.tabs.get(tabId, (tab) => {
+        if (chrome.runtime.lastError || !tab) return
+        syncPanelForTab(tabId, tab.url)
+      })
+    })
+  }
 })
