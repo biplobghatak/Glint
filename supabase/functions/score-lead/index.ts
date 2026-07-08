@@ -104,6 +104,26 @@ Deno.serve(async (req: Request) => {
   }
   const user_id = pairing.user_id
 
+  if (profile_data.linkedin_url) {
+    const { data: existing } = await supabase
+      .from("leads")
+      .select("id, match_score, match_reasons")
+      .eq("user_id", user_id)
+      .eq("linkedin_url", profile_data.linkedin_url)
+      .maybeSingle()
+
+    if (existing) {
+      return new Response(
+        JSON.stringify({
+          lead_id: existing.id,
+          match_score: existing.match_score,
+          match_reasons: existing.match_reasons,
+        }),
+        { headers: jsonHeaders }
+      )
+    }
+  }
+
   const { data: icp, error: icpError } = await supabase
     .from("icps")
     .select("target_roles, company_types, pain_points, raw_summary")

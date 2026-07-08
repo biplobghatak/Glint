@@ -430,3 +430,9 @@ entrypoint = "./functions/score-lead/index.ts"
 [functions.pair-extension]
 enabled = true
 verify_jwt = false
+
+[functions.parse-search-query]
+enabled = true
+verify_jwt = false
+import_map = "./functions/parse-search-query/deno.json"
+entrypoint = "./functions/parse-search-query/index.ts"
