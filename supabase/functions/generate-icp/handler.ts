@@ -10,29 +10,29 @@ const corsHeaders = {
 
 async function fetchSiteText(url: string): Promise<string> {
   const base = Deno.env.get("CRAWL_SERVICE_URL")
-  const secret = Deno.env.get("CRAWL_SERVICE_SECRET")
-  if (!base || !secret) {
+  const token = Deno.env.get("CRAWL_SERVICE_SECRET")
+  if (!base || !token) {
     console.error("CRAWL_SERVICE_URL or CRAWL_SERVICE_SECRET not configured")
     return ""
   }
   try {
-    const res = await fetch(`${base}/scrape`, {
+    const res = await fetch(`${base}/md`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "X-Crawl-Secret": secret,
+        Authorization: `Bearer ${token}`,
       },
       body: JSON.stringify({ url }),
       signal: AbortSignal.timeout(30000),
     })
     if (!res.ok) {
-      console.error(`crawl-service returned ${res.status}`)
+      console.error(`crawl4ai service returned ${res.status}`)
       return ""
     }
     const data = await res.json()
-    return typeof data?.content === "string" ? data.content : ""
+    return data?.success && typeof data?.markdown === "string" ? data.markdown : ""
   } catch (err) {
-    console.error(`crawl-service call failed: ${String(err)}`)
+    console.error(`crawl4ai service call failed: ${String(err)}`)
     return ""
   }
 }

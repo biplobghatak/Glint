@@ -30,13 +30,16 @@ const LONG_CONTENT = "Acme helps revenue teams. ".repeat(30) // > 200 chars
 
 Deno.test("sufficient scraped content -> returns ICP", async () => {
   setEnv()
-  let scrapeInit: RequestInit | undefined
+  let mdInit: RequestInit | undefined
   const restore = stubFetch(async (url, init) => {
-    if (url.endsWith("/scrape")) {
-      scrapeInit = init
-      return new Response(JSON.stringify({ content: LONG_CONTENT }), { status: 200 })
+    if (url.endsWith("/md")) {
+      mdInit = init
+      return new Response(
+        JSON.stringify({ success: true, markdown: LONG_CONTENT }),
+        { status: 200 },
+      )
     }
-    // LLM call (Bynara /chat/completions)
+    // LLM call (OpenAI /chat/completions)
     return new Response(
       JSON.stringify({
         choices: [{
@@ -59,9 +62,9 @@ Deno.test("sufficient scraped content -> returns ICP", async () => {
     assertEquals(res.status, 200)
     assert(!("needs_manual_input" in data))
     assertEquals(data.target_roles, ["VP Sales"])
-    // The scrape call carries the shared-secret header and JSON content type.
-    const headers = scrapeInit?.headers as Record<string, string>
-    assertEquals(headers["X-Crawl-Secret"], "s")
+    // The /md call carries the bearer token and JSON content type.
+    const headers = mdInit?.headers as Record<string, string>
+    assertEquals(headers["Authorization"], "Bearer s")
     assertEquals(headers["Content-Type"], "application/json")
   } finally {
     restore()
@@ -71,7 +74,7 @@ Deno.test("sufficient scraped content -> returns ICP", async () => {
 Deno.test("too-short scraped content -> needs_manual_input", async () => {
   setEnv()
   const restore = stubFetch(async () =>
-    new Response(JSON.stringify({ content: "short" }), { status: 200 }))
+    new Response(JSON.stringify({ success: true, markdown: "short" }), { status: 200 }))
   try {
     const res = await handler(makeReq({ website_url: "https://example.com" }))
     assertEquals(await res.json(), { needs_manual_input: true })
@@ -80,7 +83,7 @@ Deno.test("too-short scraped content -> needs_manual_input", async () => {
   }
 })
 
-Deno.test("crawl-service failure -> needs_manual_input", async () => {
+Deno.test("crawl4ai service failure -> needs_manual_input", async () => {
   setEnv()
   const restore = stubFetch(async () =>
     new Response(JSON.stringify({ error: "boom" }), { status: 502 }))
@@ -92,7 +95,7 @@ Deno.test("crawl-service failure -> needs_manual_input", async () => {
   }
 })
 
-Deno.test("crawl-service throws (timeout/network) -> needs_manual_input", async () => {
+Deno.test("crawl4ai service throws (timeout/network) -> needs_manual_input", async () => {
   setEnv()
   const restore = stubFetch(() => Promise.reject(new Error("timeout")))
   try {
