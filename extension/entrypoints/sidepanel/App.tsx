@@ -17,8 +17,17 @@ import {
   type LeadRow as Lead,
 } from "@/lib/leads"
 import { assignFolder, createFolder, type FolderRow } from "@/lib/folders"
+import {
+  DraftUnavailableError,
+  RateLimitedError,
+  fetchDraft,
+  fetchSuggestions,
+  type SuggestionRow,
+} from "@/lib/suggestions"
+import { profilePathOf, putDraft } from "@/lib/draft"
 import { FilterBar } from "@/components/filter-bar"
 import { LeadList } from "@/components/lead-list"
+import { SuggestionStrip } from "@/components/suggestion-strip"
 
 const SEARCH_DEBOUNCE_MS = 250
 const THRESHOLD_DEBOUNCE_MS = 400
@@ -85,9 +94,25 @@ export default function App() {
   // Bumped to force a refetch when nothing in `filter` changed — e.g. a run
   // just ended and wrote new leads.
   const [refreshKey, setRefreshKey] = useState(0)
+  // Separate from refreshKey on purpose. Filing a lead must refresh the strip
+  // (a filed lead is triaged and stops being suggested) but must NOT refetch
+  // the list, which would reset pagination and discard every "load more" page.
+  const [suggestKey, setSuggestKey] = useState(0)
+
+  // --- suggestions ---
+  const [suggestions, setSuggestions] = useState<SuggestionRow[]>([])
+  const [suggestionsLoading, setSuggestionsLoading] = useState(false)
+  const [suggestionsError, setSuggestionsError] = useState<string | null>(null)
+  const [draftingId, setDraftingId] = useState<string | null>(null)
+  // Once the user has a folder they have moved from discovery to organization,
+  // and the strip no longer needs to be the first thing in their face. Null
+  // until folders have loaded, so the strip doesn't flicker open then shut.
+  const [stripCollapsed, setStripCollapsed] = useState<boolean | null>(null)
 
   const listAbortRef = useRef<AbortController | null>(null)
+  const suggestAbortRef = useRef<AbortController | null>(null)
   const thresholdTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const queryRef = useRef<HTMLTextAreaElement | null>(null)
 
   useEffect(() => {
     if (!running || startedAt === null) return
@@ -180,6 +205,12 @@ export default function App() {
         setSavedMinScore(res.min_score)
         setSliderValue((v) => (v === res.min_score ? v : res.min_score))
         setFolders(res.folders)
+        // Decide the suggestion strip's initial state here, on the first
+        // response that actually carries folders — not from the `folders` state,
+        // which is [] until this lands and would lock the strip open for every
+        // user who has folders. Once set, never recomputed: re-deciding would
+        // fight the user's own toggling.
+        setStripCollapsed((prev) => (prev === null ? res.folders.length > 0 : prev))
         setListLoading(false)
 
         // The selected folder was deleted in the web app while the panel had it
@@ -292,15 +323,118 @@ export default function App() {
         }))
       )
 
-      assignFolder(leadId, folderId).catch((err: unknown) => {
-        // A lead silently sitting in the wrong folder is worse than an error.
-        setLeads(prevLeads)
-        setFolders(prevFolders)
-        setListError(err instanceof Error ? err.message : "Couldn't move that lead")
-      })
+      assignFolder(leadId, folderId)
+        .then(() => {
+          // Filing is triage: suggest-leads only offers unfiled leads, so the
+          // strip must be re-read. Deliberately not refreshKey — that would
+          // refetch the list and reset pagination.
+          setSuggestKey((k) => k + 1)
+        })
+        .catch((err: unknown) => {
+          // A lead silently sitting in the wrong folder is worse than an error.
+          setLeads(prevLeads)
+          setFolders(prevFolders)
+          setListError(err instanceof Error ? err.message : "Couldn't move that lead")
+        })
     },
     [leads, folders, filter.folderId]
   )
+
+  // --- suggestions ---
+
+  // Snapshot taken when the panel opens, and again whenever the lead set moves
+  // (a run ends, a lead is filed or contacted). refreshKey is the existing
+  // signal for exactly that.
+  useEffect(() => {
+    if (paired !== true || hasIcp !== true) return
+
+    suggestAbortRef.current?.abort()
+    const ctrl = new AbortController()
+    suggestAbortRef.current = ctrl
+
+    setSuggestionsLoading(true)
+    setSuggestionsError(null)
+    fetchSuggestions(ctrl.signal)
+      .then((rows) => {
+        setSuggestions(rows)
+        setSuggestionsLoading(false)
+      })
+      .catch((err: unknown) => {
+        // A superseded request is not a failure; a newer one is already in flight.
+        if (err instanceof DOMException && err.name === "AbortError") return
+        setSuggestionsError("Couldn't load suggestions")
+        setSuggestionsLoading(false)
+      })
+
+    return () => ctrl.abort()
+  }, [paired, hasIcp, refreshKey, suggestKey])
+
+  useEffect(() => () => suggestAbortRef.current?.abort(), [])
+
+  const handleViewProfile = useCallback((s: SuggestionRow) => {
+    // Opening a profile the user explicitly clicked is NOT the thing Spec B
+    // forbids. That rule governs the autonomous agent loop, which must never
+    // open profile pages programmatically during a run because it multiplies
+    // request volume against the user's own LinkedIn account. A human clicking
+    // a link they could have clicked on LinkedIn itself is a different act.
+    chrome.tabs.create({ url: s.linkedin_url })
+  }, [])
+
+  const handleMessage = useCallback(async (s: SuggestionRow) => {
+    const profilePath = profilePathOf(s.linkedin_url)
+    if (!profilePath) {
+      setSuggestionsError("That lead has no usable LinkedIn profile URL")
+      return
+    }
+
+    setDraftingId(s.id)
+    setSuggestionsError(null)
+
+    let opener: string
+    let isFallback = false
+    try {
+      opener = await fetchDraft(s.id)
+    } catch (err: unknown) {
+      if (err instanceof RateLimitedError) {
+        setSuggestionsError("Wait a moment before drafting again")
+        setDraftingId(null)
+        return
+      }
+      if (err instanceof DraftUnavailableError) {
+        // The documented fallback: the model failed, but the reasons this lead
+        // scored well are already stored. The user still gets something to work
+        // from, and the card says plainly that it isn't a written opener.
+        opener = (s.match_reasons ?? []).join("\n\n")
+        isFallback = true
+        if (!opener) {
+          setSuggestionsError("Couldn't draft a message for that lead")
+          setDraftingId(null)
+          return
+        }
+      } else {
+        setSuggestionsError("Couldn't draft a message for that lead")
+        setDraftingId(null)
+        return
+      }
+    }
+
+    // Hand the draft to the content script through storage, then open the tab it
+    // will be read on. Writing before navigating means the card is ready the
+    // moment the profile paints, rather than a beat later.
+    await putDraft({
+      profilePath,
+      opener,
+      leadName: s.name ?? "this lead",
+      createdAt: Date.now(),
+      isFallback,
+    })
+    chrome.tabs.create({ url: s.linkedin_url })
+    setDraftingId(null)
+  }, [])
+
+  const handleRunSearch = useCallback(() => {
+    queryRef.current?.focus()
+  }, [])
 
   function handleStart(e: FormEvent) {
     e.preventDefault()
@@ -383,6 +517,7 @@ export default function App() {
           <form onSubmit={handleStart} className="flex flex-col gap-2">
             <label className="text-sm font-medium">Who are you looking for?</label>
             <textarea
+              ref={queryRef}
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder="Find me CEOs of ecommerce startups"
@@ -445,6 +580,18 @@ export default function App() {
               )}
             </div>
           )}
+
+          <SuggestionStrip
+            suggestions={suggestions}
+            loading={suggestionsLoading}
+            error={suggestionsError}
+            collapsed={stripCollapsed ?? false}
+            onToggleCollapsed={() => setStripCollapsed((c) => !(c ?? false))}
+            onViewProfile={handleViewProfile}
+            onMessage={handleMessage}
+            draftingId={draftingId}
+            onRunSearch={handleRunSearch}
+          />
 
           <FilterBar
             filter={filter}

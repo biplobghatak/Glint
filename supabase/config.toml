@@ -467,3 +467,22 @@ enabled = true
 verify_jwt = false
 import_map = "./functions/update-lead/deno.json"
 entrypoint = "./functions/update-lead/index.ts"
+
+# suggest-leads is panel-only and device_token authenticated. It is a pure
+# query: every lead it returns was already scored against the user's ICP by
+# score-lead, so no LLM call is involved.
+[functions.suggest-leads]
+enabled = true
+verify_jwt = false
+import_map = "./functions/suggest-leads/deno.json"
+entrypoint = "./functions/suggest-leads/index.ts"
+
+# draft-opener is the only per-click, synchronous LLM call in the product.
+# Rate-limited via extension_pairings.last_draft_at before the model is called,
+# and returns 502 on model failure so the panel can fall back to showing the
+# lead's match_reasons rather than spinning.
+[functions.draft-opener]
+enabled = true
+verify_jwt = false
+import_map = "./functions/draft-opener/deno.json"
+entrypoint = "./functions/draft-opener/index.ts"
