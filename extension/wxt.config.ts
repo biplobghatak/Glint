@@ -1,3 +1,4 @@
+import { resolve } from "node:path"
 import { defineConfig } from "wxt"
 import tailwindcss from "@tailwindcss/vite"
 
@@ -5,6 +6,16 @@ import tailwindcss from "@tailwindcss/vite"
 export default defineConfig({
   modules: ["@wxt-dev/module-react"],
   vite: () => ({ plugins: [tailwindcss()] }),
+  // `wxt dev` otherwise launches a throwaway Chrome profile every run, so you
+  // are logged out of LinkedIn and Glint is unpaired each time — which makes
+  // the extension impossible to exercise. Point it at a profile directory that
+  // persists instead: sign into LinkedIn and pair once, and both survive
+  // restarts. `.wxt/` is gitignored, so the profile never enters the repo.
+  webExt: {
+    chromiumProfile: resolve(".wxt/chrome-data"),
+    keepProfileChanges: true,
+    startUrls: ["https://www.linkedin.com/feed/"],
+  },
   // The Side Panel API is Chrome-only. Emitting side_panel/sidePanel on other
   // targets makes WXT translate it into a Firefox sidebar_action, shipping a
   // sidebar whose background listeners never register.
