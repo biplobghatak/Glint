@@ -8,6 +8,7 @@ import {
 } from "react"
 import { getDeviceToken } from "@/lib/pairing"
 import { getRunState } from "@/lib/run"
+import { getPanelState, setPanelState } from "@/lib/panel-state"
 import { sendRuntimeMessage, type RuntimeMessage } from "@/lib/messages"
 import { EMPTY_FILTER, type LeadFilter } from "@/lib/filter"
 import {
@@ -59,6 +60,10 @@ function countryChips(targetCountries: string[], leads: Lead[]): string[] {
 
 export default function App() {
   const [paired, setPaired] = useState<boolean | null>(null)
+  // Guards the query-persistence effect below from firing (and overwriting
+  // glint_panel with an empty query) before the mount effect has rehydrated
+  // state from it.
+  const [hydrated, setHydrated] = useState(false)
   const [screen, setScreen] = useState<Screen>("folder")
   // The run's destination. `null` = Unfiled. Distinct from `filter.folderId`,
   // whose `null` means "all folders" — never assign one to the other.
@@ -151,26 +156,53 @@ export default function App() {
     // and back), so on every mount we must rehydrate from glint_run — not
     // just re-check pairing — or an in-flight run becomes invisible/
     // unstoppable and Start would fire a second, overlapping run.
-    Promise.all([getDeviceToken(), getRunState()]).then(([token, run]) => {
-      if (run?.active) {
-        setRunning(true)
-        setQuery(run.query)
-        setLeadCount(run.leadCount)
-        setStatus("Run in progress…")
-        // Rehydrating the true start time matters: the panel is remounted every
-        // time Chrome disables it for a non-LinkedIn tab and re-enables it, and
-        // an elapsed timer that restarted from zero on each remount would tell
-        // the user the run is younger than it is, right up until the cap fires.
-        setStartedAt(run.startedAt)
-        setMaxMinutes(run.maxMinutes)
-        // An in-flight run has already chosen its destination; skip the picker
-        // straight to the query screen, which shows the Stop button.
-        setDestination(run.folderId)
-        setScreen("query")
+    Promise.all([getDeviceToken(), getRunState(), getPanelState()]).then(
+      ([token, run, panel]) => {
+        if (run?.active) {
+          setRunning(true)
+          setQuery(run.query)
+          setLeadCount(run.leadCount)
+          setStatus("Run in progress…")
+          // Rehydrating the true start time matters: the panel is remounted every
+          // time Chrome disables it for a non-LinkedIn tab and re-enables it, and
+          // an elapsed timer that restarted from zero on each remount would tell
+          // the user the run is younger than it is, right up until the cap fires.
+          setStartedAt(run.startedAt)
+          setMaxMinutes(run.maxMinutes)
+          // An in-flight run has already chosen its destination; skip the picker
+          // straight to the query screen, which shows the Stop button.
+          setDestination(run.folderId)
+          setScreen("query")
+        } else {
+          // No active run: restore the panel's pre-run choices. Without this, a
+          // remount (e.g. the user switched away and back) would drop a picked
+          // folder and a half-typed query back to the folder picker with
+          // nothing filled in.
+          setDestination(panel.destination)
+          setQuery(panel.query)
+          setScreen(panel.destinationChosen ? "query" : "folder")
+        }
+        setPaired(token !== null)
+        setHydrated(true)
       }
-      setPaired(token !== null)
-    })
+    )
   }, [])
+
+  // Persists the in-progress query so a remount (Chrome disables/re-enables
+  // the panel on a tab switch) does not discard it. Debounced on the same
+  // interval as the search box below rather than written per keystroke: a
+  // fast typist would otherwise fire a storage.local write on every
+  // character, and the loss window a debounce reopens (a remount landing
+  // mid-keystroke) is negligible next to that cost. Gated on `hydrated` so
+  // this can't fire with the empty initial query before rehydration has had
+  // a chance to restore the real one.
+  useEffect(() => {
+    if (!hydrated) return
+    const id = setTimeout(() => {
+      setPanelState({ query })
+    }, SEARCH_DEBOUNCE_MS)
+    return () => clearTimeout(id)
+  }, [query, hydrated])
 
   useEffect(() => {
     function onMessage(message: RuntimeMessage) {
@@ -308,7 +340,18 @@ export default function App() {
     setCreatingFolder(true)
     setCreateFolderError(null)
     try {
-      setFolders(await createFolder(name))
+      // Snapshot ids before the mutation lands, so the newly created folder can
+      // be told apart from one that happened to share its name (the server
+      // 409s on duplicates, so this should be impossible, but prefer the id
+      // that wasn't already here if it somehow occurs).
+      const priorIds = new Set(folders.map((f) => f.id))
+      const updated = await createFolder(name)
+      setFolders(updated)
+      // The new folder is not selected by default, so without this the user
+      // has to create it and then click it separately.
+      const matches = updated.filter((f) => f.name === name)
+      const created = matches.find((f) => !priorIds.has(f.id)) ?? matches.at(-1)
+      if (created) setDestination(created.id)
       return true
     } catch (err: unknown) {
       // A 409 carries the server's "A folder named X already exists".
@@ -319,7 +362,7 @@ export default function App() {
     } finally {
       setCreatingFolder(false)
     }
-  }, [])
+  }, [folders])
 
   const handleAssignFolder = useCallback(
     (leadId: string, folderId: string | null) => {
@@ -572,7 +615,10 @@ export default function App() {
               folders={folders}
               selected={destination}
               onSelect={setDestination}
-              onContinue={() => setScreen("query")}
+              onContinue={() => {
+                setPanelState({ destination, destinationChosen: true })
+                setScreen("query")
+              }}
               onCreateFolder={handleCreateFolder}
               creating={creatingFolder}
               createError={createFolderError}
@@ -582,7 +628,10 @@ export default function App() {
             {!running && (
               <button
                 type="button"
-                onClick={() => setScreen("folder")}
+                onClick={() => {
+                  setPanelState({ destinationChosen: false })
+                  setScreen("folder")
+                }}
                 className="text-muted-foreground hover:text-foreground self-start text-xs"
               >
                 ‹ {destinationLabel}

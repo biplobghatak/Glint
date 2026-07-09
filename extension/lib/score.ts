@@ -60,6 +60,17 @@ export async function scoreLead(
     if (res.status === 400) {
       const detail = (await res.json().catch(() => null)) as { error?: string } | null
       if (detail?.error === "invalid_folder") throw new InvalidFolderError("invalid_folder")
+      // This call site only ever sends a folder_id when the run has one, so a
+      // 400 whose body didn't parse is far more likely to be invalid_folder
+      // (the server's response was truncated, non-JSON, or otherwise unreadable)
+      // than anything else. Falling through to `return null` here would file
+      // the next card into a folder the server has already rejected. Named
+      // failures with parseable bodies (missing_fields, invalid_json) still
+      // fall through below.
+      if (detail === null) {
+        console.warn("Glint: score-lead 400 with an unparseable body; treating as invalid_folder")
+        throw new InvalidFolderError("invalid_folder")
+      }
     }
     if (!res.ok) return null
     return (await res.json()) as ScoreResult

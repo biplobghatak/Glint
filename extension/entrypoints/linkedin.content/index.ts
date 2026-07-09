@@ -422,9 +422,18 @@ export default defineContentScript({
       draining = true
       while (queue.length) {
         const { node, cand } = queue.shift()!
-        const result = await scoreLead(cand, null)
-        if (result) {
-          injectBadge(node, result.match_score, result.match_reasons, result.min_score)
+        // Passive badging is safe from InvalidFolderError today only because
+        // this call always passes a null folder, and the server guards folder
+        // validation behind `if (folder_id)` -- an invariant that lives in
+        // another repo layer, not here. Catch anything anyway: a passive badge
+        // failing must never take down the observer loop that drives it.
+        try {
+          const result = await scoreLead(cand, null)
+          if (result) {
+            injectBadge(node, result.match_score, result.match_reasons, result.min_score)
+          }
+        } catch (err) {
+          console.warn("Glint: passive scoreLead failed", err)
         }
         await new Promise((r) => setTimeout(r, 400))
       }
