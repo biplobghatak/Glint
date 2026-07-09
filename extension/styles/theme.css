@@ -28,10 +28,9 @@
     --foreground: oklch(0.145 0 0);
 }
 
-/* Inert today: nothing in the extension ever sets a `.dark` class (there is no
-   next-themes provider), so the prefers-color-scheme mirror below is what
-   actually applies. Kept so this file stays diffable against globals.css. */
-.dark {
+/* The extension does not follow the OS theme. extension/lib/theme.ts stamps
+   data-theme on <html>; the default is light. */
+:root[data-theme="dark"] {
     --background: oklch(0.145 0 0);
     --foreground: oklch(0.985 0 0);
     --card: oklch(0.205 0 0);
@@ -50,31 +49,6 @@
     --border: oklch(1 0 0 / 10%);
     --input: oklch(1 0 0 / 15%);
     --ring: oklch(0.556 0 0);
-}
-
-/* The popup and the content-script overlay follow the browser/OS theme rather
-   than a manually toggled class, so mirror the dark tokens onto :root. */
-@media (prefers-color-scheme: dark) {
-    :root {
-        --background: oklch(0.145 0 0);
-        --foreground: oklch(0.985 0 0);
-        --card: oklch(0.205 0 0);
-        --card-foreground: oklch(0.985 0 0);
-        --popover: oklch(0.205 0 0);
-        --popover-foreground: oklch(0.985 0 0);
-        --primary: oklch(0.448 0.119 151.328);
-        --primary-foreground: oklch(0.982 0.018 155.826);
-        --secondary: oklch(0.274 0.006 286.033);
-        --secondary-foreground: oklch(0.985 0 0);
-        --muted: oklch(0.269 0 0);
-        --muted-foreground: oklch(0.708 0 0);
-        --accent: oklch(0.269 0 0);
-        --accent-foreground: oklch(0.985 0 0);
-        --destructive: oklch(0.704 0.191 22.216);
-        --border: oklch(1 0 0 / 10%);
-        --input: oklch(1 0 0 / 15%);
-        --ring: oklch(0.556 0 0);
-    }
 }
 
 @theme inline {
