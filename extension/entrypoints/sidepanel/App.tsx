@@ -565,10 +565,10 @@ export default function App() {
                 value={maxPages}
                 disabled={running}
                 onChange={(e) => {
-                  // An empty input parses to NaN, which would persist into
-                  // RunState and make nextAction's `page >= maxPages` compare
-                  // against NaN -- always false, so the run would paginate
-                  // forever until the time cap.
+                  // An empty input yields 0 (not NaN), which must be clamped to 1
+                  // to prevent it from persisting into RunState and making nextAction's
+                  // `page >= maxPages` comparison always true, causing the run to
+                  // paginate forever until the time cap.
                   const n = Number(e.target.value)
                   setMaxPages(Number.isFinite(n) ? Math.min(10, Math.max(1, Math.trunc(n))) : 1)
                 }}

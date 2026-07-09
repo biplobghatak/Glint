@@ -108,7 +108,7 @@ function sendMessage(message: RuntimeMessage) {
 // Ask the background which tab this content script instance is running in,
 // so it can be compared against RunState.tabId — a content script can't read
 // its own tab id directly. This gates whether THIS tab is allowed to drive
-// runAgentLoop() at all; see main() below.
+// runPageStep() at all; see main() below.
 async function requestMyTabId(): Promise<number | null> {
   try {
     const response = (await chrome.runtime.sendMessage({
@@ -365,10 +365,10 @@ export default defineContentScript({
 
     let agentActive = false
     let observerAttached = false
-    // True for the whole lifetime of runAgentLoop() on THIS tab, from the
+    // True for the whole lifetime of the page step run on THIS tab, from the
     // moment it's launched until its promise settles. Used to stop the
     // browser.storage.onChanged listener from re-arming passive mode while
-    // the agent loop is still unwinding (e.g. mid scoreLead()) after Stop —
+    // the page step is still unwinding (e.g. mid scoreLead()) after Stop —
     // otherwise both modes can briefly score the same cards. See Fix 3.
     let loopRunning = false
 
@@ -489,21 +489,21 @@ export default defineContentScript({
       sawStorageChange = true
       latestRunState = newState
       agentActive = computeAgentActive(newState)
-      // Don't re-arm passive mode here if this tab's own agent loop is still
+      // Don't re-arm passive mode here if this tab's own page step is still
       // unwinding (e.g. finishing a scoreLead() call after Stop cleared
-      // glint_run). runAgentLoop()'s .finally() below is the one that calls
-      // startPassive() once the loop has actually exited, sequencing the
+      // glint_run). runPageStep()'s .finally() below is the one that calls
+      // startPassive() once the step has actually exited, sequencing the
       // handoff instead of racing it.
       if (!agentActive && !loopRunning) startPassive()
     })
 
     // Resolve BOTH this tab's own id and the run state BEFORE doing any
-    // passive scanning/observing or deciding to drive the agent loop. On a
+    // passive scanning/observing or deciding to drive the page step. On a
     // search-results page the background just navigated to for a new run,
     // scanning synchronously at startup (before this resolves) would score
     // cards passively right before the agent gate closes — the exact
     // double-scoring the run mode exists to prevent. And critically: only
-    // drive runAgentLoop() when this tab IS the run's own tab (state.tabId
+    // drive runPageStep() when this tab IS the run's own tab (state.tabId
     // matches). Any other LinkedIn tab that loads or navigates during a run
     // (e.g. a lead's profile opened in a new tab) must fall back to passive
     // mode instead of independently scanning/paginating/mutating glint_run.

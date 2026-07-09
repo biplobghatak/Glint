@@ -77,8 +77,8 @@ async function reconcileRunState(navigatedTabId?: number): Promise<void> {
   if (!state?.active) return
   if (navigatedTabId !== undefined && navigatedTabId !== state.tabId) return
 
-  // Backstop for the maxMinutes cap, which is otherwise only ever enforced
-  // from inside runAgentLoop() — if no tab is running that loop anymore
+  // Backstop for the maxMinutes cap, which is otherwise enforced in nextAction
+  // (called by runPageStep) — if no tab is running the page step anymore
   // (e.g. it was navigated away before the cap tripped), nothing else would
   // ever notice the run overstayed its limit.
   if (Date.now() - state.startedAt >= state.maxMinutes * 60_000) {

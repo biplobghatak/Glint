@@ -11,8 +11,9 @@ export type StepDecision =
 /**
  * The whole control flow of a run, as a pure function of its persisted state.
  *
- * Extracted from runAgentLoop so it can be driven without a browser. The order
- * of the checks is the contract: caps outrank everything, including a pending
+ * Called by runPageStep to decide whether to scan, navigate, or stop. A pure
+ * function so it can be driven without a browser (testable). The order of the
+ * checks is the contract: caps outrank everything, including a pending
  * navigation -- otherwise a run that hit its lead cap on page 2 would still
  * load page 3 before noticing.
  */
