@@ -6,6 +6,10 @@ import { scoreLead } from "@/lib/score"
 import { getRunState, setRunState, clearRunState, type RunState } from "@/lib/run"
 import type { RuntimeMessage, WhichTabMessage, WhichTabResponse } from "@/lib/messages"
 import { consumeDraft } from "@/lib/draft"
+import { buildSearchUrl } from "@/lib/query"
+import { nextAction } from "@/lib/agent-step"
+import { renderHud, HUD_TAG, type HudHandle } from "@/lib/hud"
+import { formatScore } from "@/lib/format"
 import { renderDraftCard } from "./draft-card"
 import "./style.css"
 
@@ -15,18 +19,6 @@ const FEED_POST_SELECTOR = 'div.feed-shared-update-v2, [data-urn*="urn:li:activi
 // here rather than inlined because isGlintNode() has to recognize it.
 const DRAFT_CARD_TAG = "glint-draft-card"
 
-// UNVERIFIED against live LinkedIn markup — best-effort guesses, tried in
-// order. The first one that matches a non-disabled button wins. If none of
-// these match, clickNextPage() degrades gracefully to a scroll (see the
-// fallback below), so a wrong selector never breaks the run, but a human
-// should inspect the real "next page" button's aria-label/selector and
-// update this list. Do not add more guesses beyond these three.
-const NEXT_PAGE_SELECTORS = [
-  'button[aria-label="Next"]:not([disabled])',
-  'button[aria-label*="Next"]:not([disabled])',
-  ".artdeco-pagination__button--next:not([disabled])",
-] as const
-
 function randomDelay(minMs: number, maxMs: number): Promise<void> {
   const ms = minMs + Math.random() * (maxMs - minMs)
   return new Promise((r) => setTimeout(r, ms))
@@ -34,29 +26,6 @@ function randomDelay(minMs: number, maxMs: number): Promise<void> {
 
 function hasCommercialLimitBanner(): boolean {
   return /commercial use limit/i.test(document.body.innerText)
-}
-
-// LinkedIn renders pagination in a footer below the whole results list, and
-// only mounts it once that region has been reached. Looking for the button
-// from the top of the page finds nothing, so bring the bottom into view first
-// and give the page a beat to mount it.
-async function scrollToPagination(): Promise<void> {
-  window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" })
-  await randomDelay(700, 1400)
-}
-
-function clickNextPage(): boolean {
-  for (const selector of NEXT_PAGE_SELECTORS) {
-    const next = document.querySelector<HTMLButtonElement>(selector)
-    if (next) {
-      // A button scrolled out of view can still be clicked, but centering it
-      // matches what a person would do and avoids overlay intercepts.
-      next.scrollIntoView({ block: "center" })
-      next.click()
-      return true
-    }
-  }
-  return false
 }
 
 // Badges are Glint's own nodes, injected into LinkedIn's DOM. The
@@ -75,8 +44,11 @@ function isGlintNode(node: Node): boolean {
   if (!(node instanceof Element)) return false
   return (
     node.classList.contains("glint-badge") ||
+    node.closest(".glint-badge") !== null ||
     node.tagName.toLowerCase() === DRAFT_CARD_TAG ||
-    node.closest(`.glint-badge, ${DRAFT_CARD_TAG}`) !== null
+    node.tagName.toLowerCase() === HUD_TAG ||
+    node.closest(HUD_TAG) !== null ||
+    node.closest(DRAFT_CARD_TAG) !== null
   )
 }
 
@@ -102,9 +74,9 @@ function injectBadge(
     const belowThreshold = score < minScore
     const b = document.createElement("span")
     b.className = "glint-badge"
-    b.textContent = `Glint ${score}`
+    b.textContent = `Glint ${formatScore(score)}`
     b.title = belowThreshold
-      ? `Below your threshold of ${minScore} • ${reasons.join(" • ")}`
+      ? `Below your threshold of ${formatScore(minScore)} • ${reasons.join(" • ")}`
       : reasons.join(" • ")
     b.setAttribute(
       "style",
@@ -163,200 +135,162 @@ function postProgress(leadCount: number, status: string) {
   sendMessage({ type: "PROGRESS", leadCount, status })
 }
 
-function isOverCap(state: RunState): "leads" | "time" | null {
-  if (state.leadCount >= state.maxLeads) return "leads"
-  const elapsedMinutes = (Date.now() - state.startedAt) / 60000
-  if (elapsedMinutes >= state.maxMinutes) return "time"
-  return null
+const SCROLL_SETTLE_MS = 350
+
+/** Give a smooth scroll time to land before we start scoring what it revealed. */
+function settle(): Promise<void> {
+  return new Promise((r) => setTimeout(r, SCROLL_SETTLE_MS))
 }
 
-async function runAgentLoop(myTabId: number) {
-  const seen = new Set<string>()
-  let staleRounds = 0
-  // Tracks whether clickNextPage() has EVER successfully matched and clicked
-  // a button during this run, so a wrong NEXT_PAGE_SELECTOR (silent failure)
-  // can be told apart from genuinely exhausting the results — both currently
-  // end the same way (3 stale rounds), but they must not report the same
-  // stop reason. See the staleRounds >= 3 branch below.
-  let paginationSucceededOnce = false
-  let warnedAboutNextSelector = false
-  // Tracks whether findSearchResultCards() has EVER found a single card
-  // during this run (found, not necessarily scored) — distinct from
-  // paginationSucceededOnce. Without this, "no cards ever matched" (the
-  // selectors are stale) and "cards matched but pagination never worked"
-  // both end in the same 3-stale-rounds stop, and would be reported with
-  // the same (wrong, for the first case) message. See the staleRounds >= 3
-  // branch below for the precedence this drives.
+const SCANNING_CLASS = "glint-scanning"
+
+// Tracks whether findSearchResultCards() has EVER matched a single card during
+// this run. Module scope so the warning fires at most once across the many
+// page-steps a run makes. "The selectors are stale, no card ever matched" is
+// the one failure this stateless design cannot rule out, so it keeps its own
+// message.
+let warnedAboutNoCards = false
+
+/**
+ * Scans exactly one results page, then hands the decision back to nextAction().
+ *
+ * Stateless by construction: everything it remembers lives in RunState, so a
+ * navigation between pages costs nothing. The old loop kept `seen` in a local
+ * variable, which is why pagination had to be a button click rather than a
+ * real navigation -- and why it never worked.
+ */
+async function runPageStep(myTabId: number, hud: HudHandle) {
+  const initial = await getRunState()
+  if (!initial || !initial.active || initial.tabId !== myTabId) return
+
+  hud.update({
+    leadCount: initial.leadCount,
+    page: initial.page,
+    maxPages: initial.maxPages,
+    status: "Reading results…",
+  })
+
+  const seen = new Set(initial.seen)
   let everFoundCard = false
-  let warnedAboutNoCards = false
 
-  while (true) {
-    // Always re-read fresh state at the top of the outer loop — never trust
-    // a snapshot carried across an await.
-    const state = await getRunState()
-    if (!state || !state.active) return
-    // This tab is no longer (or never was) the run's own tab — e.g. the run
-    // ended and a different run started elsewhere in the time since our last
-    // check. Stop driving immediately, but do NOT call stopRun()/
-    // clearRunState(): that would tear down a run this tab doesn't own. Just
-    // stand down silently; the owning tab's loop is responsible for its own
-    // stop conditions.
-    if (state.tabId !== myTabId) return
+  // Preserved from the old loop, and load-bearing for different reasons.
+  //
+  // A smooth scroll does not animate in a background tab, so a run in a tab
+  // the user cannot see would score the whole page instantly and invisibly --
+  // defeating the HUD. Wait for the tab to come back instead.
+  while (document.hidden) {
+    const s = await getRunState()
+    if (!s || !s.active || s.tabId !== myTabId) return
+    await randomDelay(2000, 4000)
+  }
 
-    const cap = isOverCap(state)
-    if (cap === "leads") {
-      await stopRun("Reached lead limit")
+  // LinkedIn cuts off search for free accounts that browse too much. Scoring
+  // an empty results page would otherwise stop the run with "couldn't find
+  // result cards", pointing the reader at extract.ts instead of the truth.
+  if (hasCommercialLimitBanner()) {
+    await stopRun("LinkedIn search limit reached — try again later")
+    return
+  }
+
+  const cards = findSearchResultCards(document)
+  console.debug("Glint: page", initial.page, "cards found:", cards.length)
+
+  for (const node of cards) {
+    // Re-read fresh before every card. The inner loop runs for many seconds
+    // (a scoreLead round-trip plus pacing per card), so Stop and the caps
+    // must interrupt mid-page, not only between pages.
+    const before = await getRunState()
+    if (!before || !before.active || before.tabId !== myTabId) return
+    const decision = nextAction(before, Date.now())
+    if (decision.kind === "stop") {
+      await stopRun(decision.reason)
       return
     }
-    if (cap === "time") {
-      await stopRun("Reached time limit")
-      return
+
+    const cand = extractFromNode(node)
+    if (!cand) continue
+    everFoundCard = true
+
+    const key = cand.linkedin_url ?? `${cand.name ?? ""}|${cand.company ?? ""}`
+    if (seen.has(key)) continue
+
+    // The animation. This is the whole reason a person can tell the extension
+    // is running: previously the only scroll in this file fired once, at the
+    // end of a page, after every card had already been scored.
+    node.scrollIntoView({ behavior: "smooth", block: "center" })
+    node.classList.add(SCANNING_CLASS)
+    await settle()
+    hud.update({ status: `Scoring ${cand.name ?? "a lead"}…` })
+
+    const result = await scoreLead(cand)
+
+    node.classList.remove(SCANNING_CLASS)
+
+    // scoreLead is a network call; a Stop click can land while it is in
+    // flight. Re-read immediately before the persisted mutation and bail
+    // without writing. Writing back a pre-await snapshot here is exactly what
+    // would resurrect a cleared run.
+    const fresh = await getRunState()
+    if (!fresh || !fresh.active || fresh.tabId !== myTabId) return
+
+    seen.add(key)
+    fresh.seen = Array.from(seen)
+
+    if (result) {
+      injectBadge(node, result.match_score, result.match_reasons, result.min_score)
+      // Only rows that were actually written. A card badged muted was scored
+      // and discarded; counting it would inflate the total and trip the cap
+      // early.
+      if (result.stored) fresh.leadCount++
     }
-    if (document.hidden) {
-      await randomDelay(2000, 4000)
-      continue
-    }
-    if (hasCommercialLimitBanner()) {
-      await stopRun("LinkedIn search limit reached — try again later")
-      return
-    }
+    await setRunState(fresh)
 
-    const cards = findSearchResultCards(document)
-    let scoredThisBatch = 0
-    let extractedThisBatch = 0
-    console.debug("Glint: batch — cards found:", cards.length, "url:", location.pathname)
-
-    for (const node of cards) {
-      // Re-check stop conditions fresh before every card, not just once per
-      // batch. The inner loop can run for many seconds (scoreLead network
-      // call + pacing delay per card), so Stop and the caps must be able to
-      // interrupt mid-batch, not only at the top of the outer loop.
-      const beforeCard = await getRunState()
-      if (!beforeCard || !beforeCard.active) return
-      if (beforeCard.tabId !== myTabId) return
-      const capBeforeCard = isOverCap(beforeCard)
-      if (capBeforeCard === "leads") {
-        await stopRun("Reached lead limit")
-        return
-      }
-      if (capBeforeCard === "time") {
-        await stopRun("Reached time limit")
-        return
-      }
-
-      const cand = extractFromNode(node)
-      if (!cand) continue
-      extractedThisBatch++
-      everFoundCard = true
-      const key = cand.linkedin_url ?? `${cand.name ?? ""}|${cand.company ?? ""}`
-      if (seen.has(key)) continue
-      seen.add(key)
-
-      const result = await scoreLead(cand)
-      if (result) {
-        // scoreLead is a network call — a Stop click can land while it's in
-        // flight. Re-read the run state fresh right here, immediately before
-        // the persisted mutation, and bail without writing anything if the
-        // run was cleared or deactivated in the meantime. Writing back a
-        // pre-await snapshot here is exactly what would resurrect a cleared
-        // run (glint_run reappearing with active: true after Stop).
-        const fresh = await getRunState()
-        if (!fresh || !fresh.active) return
-        if (fresh.tabId !== myTabId) return
-        injectBadge(node, result.match_score, result.match_reasons, result.min_score)
-        scoredThisBatch++
-        fresh.leadCount++
-        await setRunState(fresh)
-        postProgress(fresh.leadCount, `Scored ${cand.name ?? "a lead"}`)
-
-        // Enforce the lead cap the instant it's crossed, rather than waiting
-        // for the next card's top-of-loop check.
-        if (fresh.leadCount >= fresh.maxLeads) {
-          await stopRun("Reached lead limit")
-          return
-        }
-      }
-      await randomDelay(400, 900)
+    if (result?.stored) {
+      postProgress(fresh.leadCount, `Scored ${cand.name ?? "a lead"}`)
+      hud.update({ leadCount: fresh.leadCount })
     }
 
-    // Containers were discovered but every one of them extracted to null.
-    // That means discovery is matching the wrong elements (a wrapper, an ad
-    // slot) rather than person cards. Dump one so the markup can be read from
-    // the page console instead of guessed at.
-    if (cards.length > 0 && extractedThisBatch === 0 && !warnedAboutNoCards) {
+    await randomDelay(400, 900)
+  }
+
+  if (!everFoundCard) {
+    if (!warnedAboutNoCards) {
       warnedAboutNoCards = true
-      const sample = cards[0] as HTMLElement
       console.warn(
-        "Glint: findSearchResultCards() matched",
-        cards.length,
-        "element(s) but extractFromNode() returned null for all of them.",
-        "\nFirst match tag/class:",
-        sample.tagName,
-        sample.className,
-        "\nProfile links inside it:",
-        sample.querySelectorAll('a[href*="/in/"]').length,
-        "\nOuter HTML (truncated):",
-        sample.outerHTML.slice(0, 800)
+        "Glint: findSearchResultCards() never found a result card on this page — check its selectors and structural discovery against the current LinkedIn markup."
       )
     }
+    await stopRun(
+      initial.page === 1
+        ? "Couldn't find LinkedIn's result cards — the page layout may have changed."
+        : `LinkedIn returned no results for page ${initial.page}`
+    )
+    return
+  }
 
-    if (scoredThisBatch === 0) {
-      staleRounds++
-      if (staleRounds >= 3) {
-        // Same symptom (3 stale rounds), three very different causes.
-        // Precedence matters: "no cards at all" must be reported before
-        // "no next-page button", since a run that never found a card also
-        // never had a reason to paginate — reporting the pagination
-        // message in that case would point the reader at the wrong file.
-        let reason: string
-        if (!everFoundCard) {
-          if (!warnedAboutNoCards) {
-            warnedAboutNoCards = true
-            console.warn(
-              "Glint: findSearchResultCards() never found a single result card on this page — check its known selectors and structural discovery against the current LinkedIn markup."
-            )
-          }
-          reason =
-            "Couldn't find LinkedIn's result cards — the page layout may have changed."
-        } else if (!paginationSucceededOnce) {
-          reason =
-            "Couldn't find LinkedIn's next-page button — stopped after the first page of results."
-        } else {
-          reason = "No more new results found"
-        }
-        await stopRun(reason)
-        return
-      }
-    } else {
-      staleRounds = 0
+  // The page is done. nextAction decides whether another one follows.
+  const done = await getRunState()
+  if (!done || !done.active || done.tabId !== myTabId) return
+  done.phase = "paginating"
+  await setRunState(done)
+
+  const decision = nextAction(done, Date.now())
+  if (decision.kind === "stop") {
+    await stopRun(decision.reason)
+    return
+  }
+  if (decision.kind === "navigate") {
+    hud.update({ status: `Opening page ${decision.page}…` })
+    const next: RunState = {
+      ...done,
+      page: decision.page,
+      phase: "scanning",
     }
-
-    // Reach the footer before looking for the pager — it isn't in the DOM
-    // until the bottom of the results list has been scrolled into view.
-    await scrollToPagination()
-
-    if (clickNextPage()) {
-      paginationSucceededOnce = true
-    } else {
-      if (!warnedAboutNextSelector) {
-        warnedAboutNextSelector = true
-        const buttons = Array.from(document.querySelectorAll("button"))
-          .filter((b) =>
-            /next|page/i.test((b.getAttribute("aria-label") ?? "") + b.textContent)
-          )
-          .map((b) => ({
-            aria: b.getAttribute("aria-label"),
-            cls: b.className,
-            txt: b.textContent?.trim().slice(0, 24),
-          }))
-        console.warn(
-          `Glint: none of NEXT_PAGE_SELECTORS (${NEXT_PAGE_SELECTORS.map((s) => `'${s}'`).join(", ")}) matched a "Next" button — falling back to scroll. Buttons on this page that look page-related:`,
-          buttons
-        )
-      }
-      window.scrollBy(0, window.innerHeight * 0.8)
-    }
-    await randomDelay(3000, 8000)
+    await setRunState(next)
+    // The background owns tab navigation -- it already does for startRun, and
+    // reconcileRunState() watches chrome.tabs.onUpdated to notice a run tab
+    // leaving LinkedIn. Two owners would make that reconciliation lie.
+    sendMessage({ type: "NAVIGATE", url: buildSearchUrl(done.parsed, decision.page) })
   }
 }
 
@@ -384,6 +318,24 @@ async function mountDraftCard(ctx: ContentScriptContext): Promise<void> {
   ui.mount()
 }
 
+// Mirrors mountDraftCard(). `position: "overlay"` + `anchor: "body"` puts the
+// host element outside LinkedIn's layout; the card positions itself fixed.
+async function mountHud(
+  ctx: ContentScriptContext,
+  onStop: () => void
+): Promise<{ hud: HudHandle; remove: () => void }> {
+  const ui = await createShadowRootUi<HudHandle>(ctx, {
+    name: HUD_TAG,
+    position: "overlay",
+    anchor: "body",
+    onMount: (container) => renderHud(container, onStop),
+    onRemove: (handle) => handle?.destroy(),
+  })
+  ui.mount()
+  // onMount has run synchronously by now, so ui.mounted is the HudHandle.
+  return { hud: ui.mounted!, remove: () => ui.remove() }
+}
+
 export default defineContentScript({
   matches: ["*://*.linkedin.com/*"],
   // Required by createShadowRootUi: hands style.css to the draft card's shadow
@@ -400,6 +352,16 @@ export default defineContentScript({
     // was loaded last. Print the build stamp so a stale extension announces
     // itself instead of masquerading as a code bug.
     console.info(`Glint: content script active (build ${__GLINT_BUILD__})`)
+
+    // The per-card ring. A <style> in the page (not the shadow root) because it
+    // decorates LinkedIn's own card elements, which the shadow root cannot see.
+    const ring = document.createElement("style")
+    ring.textContent = `.${SCANNING_CLASS} {
+      box-shadow: 0 0 0 2px #15803d, 0 6px 18px rgba(21,128,61,.18) !important;
+      border-radius: 8px;
+      transition: box-shadow .2s ease;
+    }`
+    document.head.append(ring)
 
     let agentActive = false
     let observerAttached = false
@@ -556,10 +518,15 @@ export default defineContentScript({
       agentActive = computeAgentActive(effectiveState)
       if (agentActive && myTabId !== null) {
         loopRunning = true
-        runAgentLoop(myTabId).finally(() => {
-          loopRunning = false
-          startPassive()
-        })
+        mountHud(ctx, () => sendMessage({ type: "STOP_RUN" }))
+          .then(({ hud, remove }) =>
+            runPageStep(myTabId!, hud).finally(remove)
+          )
+          .catch((err) => console.debug("Glint: mountHud failed", err))
+          .finally(() => {
+            loopRunning = false
+            startPassive()
+          })
       } else {
         startPassive()
       }

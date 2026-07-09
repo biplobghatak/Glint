@@ -25,6 +25,8 @@ import {
   type SuggestionRow,
 } from "@/lib/suggestions"
 import { profilePathOf, putDraft } from "@/lib/draft"
+import { DEFAULT_THEME, getTheme, setTheme, type Theme } from "@/lib/theme"
+import { DEFAULT_MAX_PAGES } from "@/lib/agent-step"
 import { FilterBar } from "@/components/filter-bar"
 import { LeadList } from "@/components/lead-list"
 import { SuggestionStrip } from "@/components/suggestion-strip"
@@ -55,6 +57,7 @@ function countryChips(targetCountries: string[], leads: Lead[]): string[] {
 export default function App() {
   const [paired, setPaired] = useState<boolean | null>(null)
   const [query, setQuery] = useState("")
+  const [maxPages, setMaxPages] = useState(DEFAULT_MAX_PAGES)
   const [running, setRunning] = useState(false)
   const [status, setStatus] = useState<string | null>(null)
   const [leadCount, setLeadCount] = useState(0)
@@ -64,6 +67,21 @@ export default function App() {
   const [startedAt, setStartedAt] = useState<number | null>(null)
   const [maxMinutes, setMaxMinutes] = useState(20)
   const [now, setNow] = useState(() => Date.now())
+
+  const [theme, setThemeState] = useState<Theme>(DEFAULT_THEME)
+  useEffect(() => {
+    getTheme().then(setThemeState)
+  }, [])
+
+  // setTheme writes storage AND stamps data-theme on <html>, so the CSS follows
+  // without a re-render. The local state exists only to label the button.
+  const toggleTheme = useCallback(() => {
+    setThemeState((current) => {
+      const next: Theme = current === "light" ? "dark" : "light"
+      setTheme(next)
+      return next
+    })
+  }, [])
 
   // --- lead list ---
   const [filter, setFilter] = useState<LeadFilter>(EMPTY_FILTER)
@@ -449,7 +467,7 @@ export default function App() {
     // rehydrates the real value on its next mount.
     setStartedAt(Date.now())
     setNow(Date.now())
-    chrome.runtime.sendMessage({ type: "START_RUN", query: trimmed })
+    chrome.runtime.sendMessage({ type: "START_RUN", query: trimmed, maxPages })
   }
 
   function handleStop() {
@@ -479,11 +497,21 @@ export default function App() {
 
   return (
     <div className="bg-background text-foreground flex h-full flex-col gap-4 overflow-y-auto p-4">
-      <header className="flex flex-col gap-0.5">
-        <h1 className="text-base font-semibold">Glint</h1>
-        <p className="text-muted-foreground text-xs">
-          Find and score LinkedIn leads against your ICP
-        </p>
+      <header className="flex items-start justify-between gap-2">
+        <div className="flex flex-col gap-0.5">
+          <h1 className="text-base font-semibold">Glint</h1>
+          <p className="text-muted-foreground text-xs">
+            Find and score LinkedIn leads against your ICP
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={toggleTheme}
+          aria-label={theme === "light" ? "Switch to dark theme" : "Switch to light theme"}
+          className="border-border bg-card hover:bg-accent shrink-0 rounded-[var(--radius)] border px-2 py-1 text-xs transition-colors"
+        >
+          {theme === "light" ? "🌙" : "☀️"}
+        </button>
       </header>
 
       {!paired ? (
@@ -525,6 +553,28 @@ export default function App() {
               required
               disabled={running}
             />
+            <div className="flex items-center justify-between gap-2">
+              <label htmlFor="max-pages" className="text-xs font-medium">
+                Pages to scan
+              </label>
+              <input
+                id="max-pages"
+                type="number"
+                min={1}
+                max={10}
+                value={maxPages}
+                disabled={running}
+                onChange={(e) => {
+                  // An empty input parses to NaN, which would persist into
+                  // RunState and make nextAction's `page >= maxPages` compare
+                  // against NaN -- always false, so the run would paginate
+                  // forever until the time cap.
+                  const n = Number(e.target.value)
+                  setMaxPages(Number.isFinite(n) ? Math.min(10, Math.max(1, Math.trunc(n))) : 1)
+                }}
+                className="border-border bg-card focus-visible:ring-ring w-16 rounded-[var(--radius)] border px-2 py-1 text-sm outline-none focus-visible:ring-2 disabled:opacity-50"
+              />
+            </div>
             {!running ? (
               <button
                 type="submit"

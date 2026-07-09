@@ -7,6 +7,7 @@ import {
   type LeadSort,
 } from "@/lib/filter"
 import type { FolderRow } from "@/lib/folders"
+import { formatScore } from "@/lib/format"
 
 const SORT_LABELS: Record<LeadSort, string> = {
   score_desc: "Highest score",
@@ -138,18 +139,22 @@ export function FilterBar({
           <label htmlFor="min-score" className="text-xs font-medium">
             Score threshold
           </label>
-          <span className="text-muted-foreground text-xs tabular-nums">{minScore}</span>
+          <span className="text-muted-foreground text-xs tabular-nums">
+            {formatScore(minScore)}
+          </span>
         </div>
-        {/* 0-100. score-lead prompts for and stores 0-100; nothing divides by
-            10, so a "greater than 7" threshold would hide almost nothing. */}
+        {/* The user's scale is 0-10; storage's is 0-100. This input is the only
+            place in the panel where the two meet: `minScore` in and out of this
+            component is always 0-100. A step of 1 here is a step of 10 there,
+            preserving the old slider's granularity. */}
         <input
           id="min-score"
           type="range"
           min={0}
-          max={100}
-          step={5}
-          value={minScore}
-          onChange={(e) => onMinScoreChange(Number(e.target.value))}
+          max={10}
+          step={0.5}
+          value={minScore / 10}
+          onChange={(e) => onMinScoreChange(Math.round(Number(e.target.value) * 10))}
           className="accent-primary w-full"
         />
       </div>

@@ -1,6 +1,7 @@
 import type { LeadRow as Lead } from "@/lib/leads"
 import type { FolderRow } from "@/lib/folders"
 import { countryLabel } from "@/lib/filter"
+import { formatScore } from "@/lib/format"
 
 // A lead's folder_id is genuinely null when unfiled, and <option value=""> is
 // what the DOM reports for "no value". The sentinel keeps the two apart.
@@ -65,9 +66,9 @@ export function LeadRow({
               "shrink-0 rounded-full px-2 py-0.5 text-xs font-semibold tabular-nums " +
               scoreClass(score, minScore)
             }
-            title={belowThreshold ? `Below your threshold of ${minScore}` : undefined}
+            title={belowThreshold ? `Below your threshold of ${formatScore(minScore)}` : undefined}
           >
-            {score}
+            {formatScore(score)}
           </span>
         )}
       </div>

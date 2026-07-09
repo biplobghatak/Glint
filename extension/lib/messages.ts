@@ -1,5 +1,8 @@
-export type StartRunMessage = { type: "START_RUN"; query: string }
+export type StartRunMessage = { type: "START_RUN"; query: string; maxPages: number }
 export type StopRunMessage = { type: "STOP_RUN" }
+// Sent by the content script when a results page is exhausted and another
+// follows. The background owns tab navigation; see runPageStep's comment.
+export type NavigateMessage = { type: "NAVIGATE"; url: string }
 export type ProgressMessage = {
   type: "PROGRESS"
   leadCount: number
@@ -18,6 +21,7 @@ export type WhichTabMessage = { type: "WHICH_TAB" }
 export type RuntimeMessage =
   | StartRunMessage
   | StopRunMessage
+  | NavigateMessage
   | ProgressMessage
   | StoppedMessage
   | RunErrorMessage
