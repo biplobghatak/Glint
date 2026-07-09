@@ -9,17 +9,16 @@ export default function DashboardLoading() {
   return (
     <>
       <PageHeader title="Dashboard" />
-      <div className="flex flex-col gap-4 p-4">
+      <div className="mx-auto flex w-full max-w-5xl flex-col gap-4 p-4">
         <Card>
-          <CardHeader>
-            <Skeleton className="h-3 w-28 rounded" />
-          </CardHeader>
-          <CardContent className="grid gap-8 md:grid-cols-[minmax(0,15rem)_1fr] md:items-end md:gap-12">
-            <div className="flex flex-col gap-4">
+          {/* The score card's eyebrow sits with its number, not in a CardHeader. */}
+          <CardContent className="grid gap-8 md:grid-cols-[17rem_1fr] md:items-end md:gap-10">
+            <div className="flex flex-col gap-3">
+              <Skeleton className="h-3 w-28 rounded" />
               <Skeleton className="h-14 w-32 rounded" />
               <Skeleton className="h-4 w-48 rounded" />
             </div>
-            <div className="flex h-32 items-end gap-1.5">
+            <div className="flex h-44 items-end gap-1.5 pt-5">
               {[18, 26, 34, 52, 74, 100, 88, 60, 32, 16].map((height, i) => (
                 <Skeleton
                   key={i}
