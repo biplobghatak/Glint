@@ -78,7 +78,7 @@ function stubScoreLeadBackend(opts: {
   }
 }
 
-Deno.test("below min_score: returns the score, inserts nothing, stored=false", async () => {
+Deno.test("below min_score: returns the score, inserts nothing, stored=false, inserted=false", async () => {
   const restore = stubScoreLeadBackend({ minScore: 70, llmScore: 42 })
   const res = await handler(makeReq({ device_token: "t", profile_data: { name: "A" } }))
   const body = await res.json()
@@ -87,16 +87,24 @@ Deno.test("below min_score: returns the score, inserts nothing, stored=false", a
   assertEquals(body.match_score, 42)
   assertEquals(body.min_score, 70)
   assertEquals(body.stored, false)
+  // A discarded lead was never written, so it can never count toward the cap.
+  assertEquals(body.inserted, false)
   assertEquals(insertedRows.length, 0)
   restore()
 })
 
-Deno.test("at min_score: inserts and reports stored=true", async () => {
+Deno.test("at min_score: inserts and reports stored=true, inserted=true", async () => {
   const restore = stubScoreLeadBackend({ minScore: 70, llmScore: 70 })
   const res = await handler(makeReq({ device_token: "t", profile_data: { name: "A" } }))
   const body = await res.json()
 
   assertEquals(body.stored, true)
+  // A fresh insert is the one path that counts toward the run's leadCount.
+  assertEquals(body.inserted, true)
+  // A score exactly at the threshold is kept (>=, not >), and the response
+  // echoes both the score and the threshold it was measured against.
+  assertEquals(body.match_score, 70)
+  assertEquals(body.min_score, 70)
   assertEquals(insertedRows.length, 1)
   restore()
 })
@@ -111,5 +119,24 @@ Deno.test("dedupe branch reports stored=true -- the row already exists", async (
 
   assertEquals(body.stored, true)
   assertEquals(body.match_score, 90)
+  restore()
+})
+
+// The dedupe branch returns before the LLM and before any INSERT. `stored` is
+// true (a row exists) but `inserted` is false (this call wrote nothing), so a
+// re-encountered lead can never fill the run's NEW-work cap. The insert-count
+// assertion is what proves the branch really skipped the write, not merely that
+// it reported it did.
+Deno.test("dedupe branch: stored=true, inserted=false, and nothing is written", async () => {
+  const restore = stubScoreLeadBackend({ minScore: 70, existingLead: { id: "l1", match_score: 90, match_reasons: ["r"] } })
+  const res = await handler(makeReq({
+    device_token: "t",
+    profile_data: { name: "A", linkedin_url: "https://www.linkedin.com/in/a" },
+  }))
+  const body = await res.json()
+
+  assertEquals(body.stored, true)
+  assertEquals(body.inserted, false)
+  assertEquals(insertedRows.length, 0)
   restore()
 })

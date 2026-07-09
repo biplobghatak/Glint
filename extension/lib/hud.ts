@@ -42,7 +42,7 @@ export function renderHud(container: HTMLElement, onStop: () => void): HudHandle
       <span class="glint-hud-title">Glint is searching</span>
     </div>
     <div class="glint-hud-count"></div>
-    <div class="glint-hud-muted">leads scored · <span class="glint-hud-pages"></span></div>
+    <div class="glint-hud-muted">new leads · <span class="glint-hud-pages"></span></div>
     <div class="glint-hud-status"></div>
     <button type="button" class="glint-hud-stop">Stop</button>
   `

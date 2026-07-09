@@ -58,8 +58,8 @@ function badgeColor(score: number): string {
   return "#6b7280"
 }
 
-// A lead scoring below the user's threshold is still scored, still stored, and
-// still badged — muted, not hidden. No badge must always mean "Glint hasn't
+// A lead scoring below the user's threshold is still scored and still badged —
+// muted, not hidden — but NOT stored. No badge must always mean "Glint hasn't
 // scored this card", never "Glint scored it low": absence of feedback is
 // indistinguishable from a broken extension, and the user would have no way to
 // tell a filtered-out lead from a crashed content script.
@@ -238,14 +238,16 @@ async function runPageStep(myTabId: number, hud: HudHandle) {
 
     if (result) {
       injectBadge(node, result.match_score, result.match_reasons, result.min_score)
-      // Only rows that were actually written. A card badged muted was scored
-      // and discarded; counting it would inflate the total and trip the cap
-      // early.
-      if (result.stored) fresh.leadCount++
+      // Only rows this call actually wrote. `stored` is also true for a dedupe
+      // hit (the row already existed), and a re-encountered lead must not count
+      // toward a cap that exists to bound NEW work — so gate on `inserted`, not
+      // `stored`. A card badged muted was scored and discarded; counting either
+      // would inflate the total and trip the cap early.
+      if (result.inserted) fresh.leadCount++
     }
     await setRunState(fresh)
 
-    if (result?.stored) {
+    if (result?.inserted) {
       postProgress(fresh.leadCount, `Scored ${cand.name ?? "a lead"}`)
       hud.update({ leadCount: fresh.leadCount })
     }
@@ -520,7 +522,21 @@ export default defineContentScript({
         loopRunning = true
         mountHud(ctx, () => sendMessage({ type: "STOP_RUN" }))
           .then(({ hud, remove }) =>
-            runPageStep(myTabId!, hud).finally(remove)
+            // An unexpected throw from the page step (e.g. findSearchResultCards
+            // / extractFromNode choking on hostile markup) would otherwise reject
+            // out to the outer .catch: the HUD is torn down and passive mode
+            // resumes, but glint_run stays active: true with nothing driving it,
+            // clearing only when reconcileRunState()'s maxMinutes backstop fires.
+            // Catch it here and stopRun so the run ends now. This only fires on a
+            // real throw — a deliberate navigate or an already-issued stopRun
+            // returns normally and never reaches here. finally(remove) is
+            // untouched: a bare `return` inside the card loop still removes the HUD.
+            runPageStep(myTabId!, hud)
+              .catch((err) => {
+                console.error("Glint: page step failed", err)
+                return stopRun("Something went wrong on this page")
+              })
+              .finally(remove)
           )
           .catch((err) => console.debug("Glint: mountHud failed", err))
           .finally(() => {

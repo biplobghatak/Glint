@@ -169,6 +169,9 @@ export async function handler(req: Request): Promise<Response> {
           // it also never re-evaluates the threshold: a lead stored under an
           // older, lower min_score stays stored.
           stored: true,
+          // This call wrote nothing — the row was already here. leadCount is
+          // meant to bound NEW work, so a re-encountered lead must not count.
+          inserted: false,
         }),
         { headers: jsonHeaders }
       )
@@ -223,6 +226,7 @@ export async function handler(req: Request): Promise<Response> {
         match_reasons: score.match_reasons,
         min_score: icp.min_score,
         stored: false,
+        inserted: false,
       }),
       { headers: jsonHeaders }
     )
@@ -260,6 +264,8 @@ export async function handler(req: Request): Promise<Response> {
       match_reasons: score.match_reasons,
       min_score: (icp as Icp).min_score ?? DEFAULT_MIN_SCORE,
       stored: true,
+      // This call wrote the row. Only this path increments the run's leadCount.
+      inserted: true,
     }),
     { headers: jsonHeaders }
   )

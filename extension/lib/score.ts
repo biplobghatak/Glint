@@ -13,9 +13,17 @@ export type ScoreResult = {
   /**
    * Whether a `leads` row exists for this lead. False when the score was
    * computed but discarded for falling below the user's min_score. The card is
-   * still badged (muted); it is simply not counted and not stored.
+   * still badged (muted); it is simply not stored. Dedupe → true, fresh
+   * insert → true, discard → false.
    */
   stored: boolean
+  /**
+   * Whether THIS call wrote the row. Distinct from `stored`: a dedupe hit is
+   * `stored: true, inserted: false` because the row already existed. Only
+   * `inserted` drives the run's leadCount — the cap bounds new work, not leads
+   * merely re-encountered on a re-run.
+   */
+  inserted: boolean
 }
 
 export async function scoreLead(

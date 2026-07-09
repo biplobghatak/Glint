@@ -25,7 +25,7 @@ describe("renderHud", () => {
   })
 
   // A partial update must not reset the fields it omits -- the scan updates
-  // `status` per card and `leadCount` only when a lead is stored.
+  // `status` per card and `leadCount` only when a lead is newly inserted.
   it("merges a partial update instead of replacing the model", () => {
     const hud = renderHud(container, () => {})
     hud.update({ leadCount: 3, page: 2, maxPages: 5 })
