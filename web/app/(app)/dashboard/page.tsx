@@ -1,7 +1,10 @@
 import { redirect } from "next/navigation"
 import { createClient } from "@/lib/supabase/server"
 import { getActiveSite } from "@/lib/sites"
-import { DashboardView, type DashboardData } from "./dashboard-view"
+import { BUCKET_COUNT, DashboardView, type DashboardData } from "./dashboard-view"
+
+/** No ICP row yet means no threshold has been chosen; `icps.min_score` defaults to 70. */
+const DEFAULT_MIN_SCORE = 70
 
 export default async function DashboardPage() {
   const supabase = await createClient()
@@ -43,11 +46,7 @@ export default async function DashboardPage() {
       .eq("site_id", site.id)
       .eq("status", "contacted"),
     supabase.from("leads").select("match_score").eq("site_id", site.id),
-    supabase
-      .from("icps")
-      .select("target_roles, company_types, pain_points")
-      .eq("site_id", site.id)
-      .maybeSingle(),
+    supabase.from("icps").select("min_score").eq("site_id", site.id).maybeSingle(),
     supabase
       .from("leads")
       .select("id, name, company, role, linkedin_url, match_score")
@@ -56,20 +55,42 @@ export default async function DashboardPage() {
       .limit(5),
   ])
 
+  // A null match_score is a lead that was never scored, which is not a zero. It
+  // belongs to no bucket, counts toward no average, and clears no threshold.
   const scoreValues = (scores ?? [])
     .map((l) => l.match_score)
     .filter((s): s is number => typeof s === "number")
+
   const avgScore =
     scoreValues.length > 0
       ? Math.round(scoreValues.reduce((a, b) => a + b, 0) / scoreValues.length)
       : null
 
+  const minScore = icp?.min_score ?? DEFAULT_MIN_SCORE
+
+  // Ten buckets of ten points. A perfect 100 has no bucket of its own, so it
+  // shares the top one with the 90s.
+  const histogram = Array<number>(BUCKET_COUNT).fill(0)
+  for (const score of scoreValues) {
+    histogram[Math.min(BUCKET_COUNT - 1, Math.floor(score / 10))] += 1
+  }
+
+  const totalLeads = total ?? 0
+  const newLeads = newCount ?? 0
+  const contactedLeads = contactedCount ?? 0
+
   const data: DashboardData = {
-    totalLeads: total ?? 0,
-    newLeads: newCount ?? 0,
-    contactedLeads: contactedCount ?? 0,
+    totalLeads,
+    newLeads,
+    contactedLeads,
+    // `status` is CHECK-constrained to new | contacted | ignored, so the three
+    // segments are exhaustive and the remainder needs no query of its own.
+    ignoredLeads: Math.max(0, totalLeads - newLeads - contactedLeads),
     avgScore,
-    icp: icp ?? null,
+    minScore,
+    scoredCount: scoreValues.length,
+    clearingCount: scoreValues.filter((s) => s >= minScore).length,
+    histogram,
     recentLeads: recent ?? [],
   }
 
