@@ -39,7 +39,7 @@ const DRAFT_SCHEMA = {
     opener: {
       type: "string",
       description:
-        `A LinkedIn outreach opener, at most ${MAX_OPENER_CHARS} characters. No greeting placeholder like [Name] or {{first_name}}. References one concrete match reason. No sign-off. No em dashes or en dashes. Must end with a call to action.`,
+        `A LinkedIn outreach opener, at most ${MAX_OPENER_CHARS} characters. Opens with a greeting: "Hi <first name>," (or "Hi there," if the name is unknown). Never a placeholder like [Name] or {{first_name}}. References one concrete match reason. No sign-off. No em dashes or en dashes. Must end with a call to action.`,
     },
   },
   required: ["opener"],
@@ -61,6 +61,29 @@ type Lead = {
   match_reasons: string[] | null
 }
 
+/**
+ * The name to greet someone by.
+ *
+ * LinkedIn stores a display name ("Priya Sharma", sometimes "Dr. Alan Kay, PhD"),
+ * and "Hi Priya Sharma," reads like a form letter. Take the first token and
+ * nothing else. A model asked to do this itself will occasionally greet someone
+ * by their surname or their credentials, so it is done here, not in the prompt.
+ *
+ * Returns null when there is no usable first name, which the prompt turns into
+ * "Hi there," — never a placeholder the user has to find and replace.
+ */
+const HONORIFIC = /^(mr|mrs|ms|miss|dr|prof|sir|rev)$/i
+
+function greetingName(name: string | null): string | null {
+  for (const token of (name ?? "").trim().split(/\s+/)) {
+    // A trailing period catches "Dr."; HONORIFIC catches the bare spellings.
+    const word = token.replace(/[.,]+$/, "")
+    if (!word || HONORIFIC.test(word)) continue
+    return word
+  }
+  return null
+}
+
 function draftPrompt(icp: Icp, lead: Lead): string {
   // match_reasons is why this lead scored well, in the model's own earlier
   // words. It is the most specific thing we know about them. When it is empty
@@ -71,6 +94,9 @@ function draftPrompt(icp: Icp, lead: Lead): string {
     reasons.length > 0
       ? `Why they match: ${reasons.join("; ")}`
       : `What we know: ${[lead.role, lead.company].filter(Boolean).join(" at ") || "very little"}`
+
+  const greeting = greetingName(lead.name)
+  const openingLine = greeting ? `Hi ${greeting},` : "Hi there,"
 
   return [
     "Write the opening message of a LinkedIn outreach conversation.",
@@ -87,11 +113,12 @@ function draftPrompt(icp: Icp, lead: Lead): string {
     `- ${grounding}`,
     "",
     "Rules:",
-    `- At most ${MAX_OPENER_CHARS} characters.`,
+    `- Begin with exactly this greeting, on its own, before anything else: ${openingLine}`,
+    "- Never invent a different greeting, and never use a placeholder like [Name] or {{first_name}}.",
+    `- At most ${MAX_OPENER_CHARS} characters, greeting included.`,
     "- No em dashes (—) or en dashes (–). Use a period or comma instead.",
     "- End with a call to action: either a question, or an imperative like 'Let me know if you're open to a chat.'",
     "- Reference one concrete, specific reason this person is relevant.",
-    "- No greeting placeholder tokens. Address them by name directly, or not at all.",
     "- No sign-off, no signature, no 'Best regards'.",
     "- Plain, direct, and human. No marketing adjectives. Do not claim you read something you did not.",
   ].join("\n")
@@ -107,6 +134,10 @@ function violationDescription(reason: string): string {
       return "it used an em dash or en dash"
     case "no_cta":
       return "it did not end with a call to action"
+    case "no_greeting":
+      return "it did not begin with a greeting like 'Hi Priya,'"
+    case "placeholder":
+      return "it contained a placeholder token the sender would have to fill in"
     case "empty":
       return "it was empty"
     default:

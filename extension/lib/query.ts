@@ -81,12 +81,74 @@ export async function parseQuery(query: string): Promise<ParsedQuery> {
  * comments admitted were unverified, and silently fell back to a scroll when
  * they missed -- which is why runs never left page 1.
  */
+// A top-level ` OR ` between the model's alternatives. Uppercase is required:
+// LinkedIn treats a lowercase `or` as an ordinary search word.
+const OR_SEPARATOR = /\s+OR\s+/
+
+/**
+ * One search term, quoted iff it is a phrase.
+ *
+ * LinkedIn ANDs the words of an unquoted phrase, so a bare `agency owner` means
+ * `agency AND owner` and drifts onto anyone whose profile happens to contain
+ * both words. A single word is left alone: quoting it would suppress LinkedIn's
+ * stemming for no benefit.
+ */
+function quoteTerm(raw: string): string {
+  const t = raw.trim()
+  if (!t) return ""
+  if (t.length > 1 && t.startsWith('"') && t.endsWith('"')) return t
+  if (!/\s/.test(t)) return t
+  // An interior quote would close the phrase early and hand LinkedIn a
+  // malformed expression. There is nothing useful to escape it to.
+  return `"${t.replace(/"/g, " ").replace(/\s+/g, " ").trim()}"`
+}
+
+/**
+ * The `keywords` value: the model's alternatives, grouped, ANDed with the
+ * location.
+ *
+ * This function exists because of a live bug. `location` used to be appended to
+ * `keywords` with a space, and LinkedIn's boolean parser binds implicit AND
+ * tighter than OR — so
+ *
+ *     agency owner OR agency partner OR agency founder United Kingdom
+ *
+ * parsed as `A OR B OR (C AND United AND Kingdom)`. Only the LAST alternative
+ * was constrained to the UK, and none of the phrases were quoted. The search
+ * returned agency owners anywhere on earth, exactly as asked, for a query the
+ * user never wrote.
+ *
+ * So the OR group is parenthesised, every phrase is quoted, and the location is
+ * joined with an explicit AND. `location` is still matched as TEXT, not as
+ * LinkedIn's geography facet — a profile reading "clients across the United
+ * Kingdom" still matches. Narrowing that needs `geoUrn` and a resolved geo id;
+ * see the spec.
+ */
+export function composeKeywords(keywords: string, location: string): string {
+  const kw = keywords.trim()
+  const loc = quoteTerm(location)
+
+  let expr = ""
+  if (kw) {
+    // The model was allowed to group its own alternatives. If it did, its
+    // grouping is authoritative and re-splitting on ` OR ` would shred it.
+    if (kw.includes("(")) {
+      expr = kw
+    } else {
+      const terms = kw.split(OR_SEPARATOR).map(quoteTerm).filter(Boolean)
+      expr = terms.join(" OR ")
+      if (terms.length > 1) expr = `(${expr})`
+    }
+  }
+
+  if (!expr) return loc
+  if (!loc) return expr
+  return `${expr} AND ${loc}`
+}
+
 export function buildSearchUrl(parsed: ParsedQuery, page = 1): string {
   const params = new URLSearchParams()
-  const kw = [parsed.keywords, parsed.location]
-    .filter((s) => s && s.trim())
-    .join(" ")
-    .trim()
+  const kw = composeKeywords(parsed.keywords, parsed.location)
   if (kw) params.set("keywords", kw)
   if (parsed.title && parsed.title.trim()) params.set("title", parsed.title.trim())
   if (page > 1) params.set("page", String(page))

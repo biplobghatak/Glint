@@ -1,7 +1,63 @@
 import { describe, expect, it } from "vitest"
-import { buildSearchUrl, isRunPage } from "./query"
+import { buildSearchUrl, composeKeywords, isRunPage } from "./query"
 
 const parsed = { title: "CTO", keywords: "fintech", location: "Berlin" }
+
+describe("composeKeywords", () => {
+  // The live bug, verbatim. "Find me Agency owner in United Kingdom" produced
+  // `agency owner OR agency partner OR agency founder United Kingdom`, which
+  // LinkedIn parsed as `A OR B OR (C AND United AND Kingdom)` -- so two of the
+  // three alternatives searched the entire planet.
+  it("constrains every alternative to the location, not just the last", () => {
+    expect(
+      composeKeywords(
+        "agency owner OR agency partner OR agency founder",
+        "United Kingdom"
+      )
+    ).toBe(
+      '("agency owner" OR "agency partner" OR "agency founder") AND "United Kingdom"'
+    )
+  })
+
+  // A single word is left bare: quoting it would suppress LinkedIn's stemming
+  // for no benefit. Only phrases need the quotes.
+  it("quotes phrases but leaves single words unquoted", () => {
+    expect(composeKeywords("dtc brand OR shopify", "")).toBe('("dtc brand" OR shopify)')
+    expect(composeKeywords("fintech", "Berlin")).toBe("fintech AND Berlin")
+    expect(composeKeywords("agency owner", "Berlin")).toBe('"agency owner" AND Berlin')
+  })
+
+  // The group is kept even with nothing ANDed onto it today, so that adding a
+  // location (or any future term) cannot silently re-associate the ORs.
+  it("parenthesises the OR group but not a lone alternative", () => {
+    expect(composeKeywords("shopify OR ecommerce", "")).toBe("(shopify OR ecommerce)")
+    expect(composeKeywords("fintech", "")).toBe("fintech")
+  })
+
+  it("trusts grouping the model supplied itself", () => {
+    const grouped = "(founder OR owner) AND (agency OR studio)"
+    expect(composeKeywords(grouped, "United Kingdom")).toBe(
+      `${grouped} AND "United Kingdom"`
+    )
+  })
+
+  it("handles either side being absent", () => {
+    expect(composeKeywords("", "United Kingdom")).toBe('"United Kingdom"')
+    expect(composeKeywords("fintech OR saas", "")).toBe("(fintech OR saas)")
+    expect(composeKeywords("", "")).toBe("")
+    expect(composeKeywords("   ", "  ")).toBe("")
+  })
+
+  // An interior quote would close the phrase early and hand LinkedIn a
+  // malformed expression.
+  it("neutralises interior quotes rather than escaping them", () => {
+    expect(composeKeywords('agency "owner"', "")).toBe('"agency owner"')
+  })
+
+  it("ignores a lowercase or, which LinkedIn treats as a search word", () => {
+    expect(composeKeywords("this or that", "")).toBe('"this or that"')
+  })
+})
 
 describe("buildSearchUrl", () => {
   // Page 1 must stay byte-identical to what shipped, or every existing run
@@ -18,7 +74,8 @@ describe("buildSearchUrl", () => {
 
   it("keeps keywords and title alongside the page", () => {
     const params = new URL(buildSearchUrl(parsed, 2)).searchParams
-    expect(params.get("keywords")).toBe("fintech Berlin")
+    // The location is ANDed, not concatenated. See composeKeywords.
+    expect(params.get("keywords")).toBe("fintech AND Berlin")
     expect(params.get("title")).toBe("CTO")
     expect(params.get("page")).toBe("2")
   })

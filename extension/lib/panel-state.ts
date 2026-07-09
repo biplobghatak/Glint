@@ -18,12 +18,27 @@ export type PanelState = {
   destinationChosen: boolean
   /** The in-progress search query, so a tab switch does not discard it. */
   query: string
+  /**
+   * Run in a window of Glint's own rather than the tab the panel is attached to.
+   *
+   * The only way to keep browsing during a run. Chrome reports a page `hidden`
+   * the moment its tab stops being its window's selected tab, and a hidden page
+   * is throttled to the point where LinkedIn's cards may never render — so a run
+   * in the user's tab pauses whenever they switch tabs. The selected tab of an
+   * *unfocused* window is still `visible`, so a separate window survives the user
+   * working elsewhere. It does not survive being minimized or fully covered.
+   *
+   * Off by default: adopting the tab is what the user asked for, and most runs
+   * are watched rather than left alone.
+   */
+  ownWindow: boolean
 }
 
 export const EMPTY_PANEL_STATE: PanelState = {
   destination: null,
   destinationChosen: false,
   query: "",
+  ownWindow: false,
 }
 
 /**
@@ -42,6 +57,7 @@ export function normalizePanelState(stored: unknown): PanelState {
       : null,
     destinationChosen: s.destinationChosen === true,
     query: typeof s.query === "string" ? s.query : "",
+    ownWindow: s.ownWindow === true,
   }
 }
 
