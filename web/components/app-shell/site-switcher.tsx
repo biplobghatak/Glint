@@ -29,15 +29,9 @@ function SiteSwitcher({
 
   const active = sites.find((s) => s.id === activeSiteId) ?? null
 
-  // One site is not a choice. Show it as a label rather than a control that
-  // does nothing when clicked.
-  if (sites.length <= 1) {
-    return (
-      <p className="text-muted-foreground truncate px-3 text-xs font-medium tracking-wider uppercase">
-        {active?.name ?? "No site"}
-      </p>
-    )
-  }
+  // Always a control, never a label — even with one site. The menu is not only a
+  // chooser: it holds "Add a website". Hiding it below two sites would make the
+  // second site unreachable from here, which is the exact case that needs it.
 
   function choose(siteId: string) {
     setOpen(false)
