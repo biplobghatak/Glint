@@ -1,7 +1,7 @@
 import { isLinkedIn } from "@/lib/linkedin"
 import { parseQuery, buildSearchUrl, UnpairedError, NoIcpError, QueryServiceError, NetworkError } from "@/lib/query"
 import { getRunState, setRunState, clearRunState } from "@/lib/run"
-import type { RuntimeMessage } from "@/lib/messages"
+import type { RuntimeMessage, WhichTabResponse } from "@/lib/messages"
 
 const DEFAULT_MAX_LEADS = 100
 const DEFAULT_MAX_MINUTES = 20
@@ -138,11 +138,19 @@ export default defineBackground(() => {
     // wxt.config.ts's browser-conditional manifest — so this listener has no
     // sender on other targets. Scoping it here keeps that dependency honest
     // instead of registering a listener that can never receive a message.
-    chrome.runtime.onMessage.addListener((message: RuntimeMessage) => {
+    chrome.runtime.onMessage.addListener((message: RuntimeMessage, sender, sendResponse) => {
       if (message.type === "START_RUN") {
         handleStartRunMessage(message.query)
       } else if (message.type === "STOP_RUN") {
         clearRunState()
+      } else if (message.type === "WHICH_TAB") {
+        // Answer synchronously (no await needed), but we must still return
+        // `true` here — and only here — to tell Chrome to keep the message
+        // channel open for sendResponse. Returning true unconditionally from
+        // this listener would keep the port open for START_RUN/STOP_RUN too,
+        // which never call sendResponse and must keep returning undefined.
+        sendResponse({ tabId: sender.tab?.id ?? null } satisfies WhichTabResponse)
+        return true
       }
     })
 

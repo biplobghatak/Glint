@@ -2,7 +2,7 @@ import { browser } from "wxt/browser"
 import { extractFromNode, type LeadCandidate } from "@/lib/extract"
 import { scoreLead } from "@/lib/score"
 import { getRunState, setRunState, clearRunState, type RunState } from "@/lib/run"
-import type { RuntimeMessage } from "@/lib/messages"
+import type { RuntimeMessage, WhichTabMessage, WhichTabResponse } from "@/lib/messages"
 
 const SEARCH_RESULT_SELECTOR =
   'li.reusable-search__result-container, div.entity-result, [data-view-name="search-entity-result"]'
@@ -67,6 +67,27 @@ function sendMessage(message: RuntimeMessage) {
   chrome.runtime.sendMessage(message).catch(() => {})
 }
 
+// Ask the background which tab this content script instance is running in,
+// so it can be compared against RunState.tabId — a content script can't read
+// its own tab id directly. This gates whether THIS tab is allowed to drive
+// runAgentLoop() at all; see main() below.
+async function requestMyTabId(): Promise<number | null> {
+  try {
+    const response = (await chrome.runtime.sendMessage({
+      type: "WHICH_TAB",
+    } satisfies WhichTabMessage)) as WhichTabResponse | undefined
+    return response?.tabId ?? null
+  } catch {
+    // On Firefox, background.ts registers no listeners at all (everything
+    // is gated behind `BROWSER === "chrome"`), so this request has no
+    // receiving end and the promise rejects ("Could not establish
+    // connection"). Treat that as "this is not the run's tab" — runs can
+    // never start on Firefox anyway (the side panel is Chrome-only), so
+    // falling back to passive mode is correct, not a degraded state.
+    return null
+  }
+}
+
 async function stopRun(reason: string) {
   await clearRunState()
   sendMessage({ type: "STOPPED", reason })
@@ -83,15 +104,29 @@ function isOverCap(state: RunState): "leads" | "time" | null {
   return null
 }
 
-async function runAgentLoop() {
+async function runAgentLoop(myTabId: number) {
   const seen = new Set<string>()
   let staleRounds = 0
+  // Tracks whether clickNextPage() has EVER successfully matched and clicked
+  // a button during this run, so a wrong NEXT_PAGE_SELECTOR (silent failure)
+  // can be told apart from genuinely exhausting the results — both currently
+  // end the same way (3 stale rounds), but they must not report the same
+  // stop reason. See the staleRounds >= 3 branch below.
+  let paginationSucceededOnce = false
+  let warnedAboutNextSelector = false
 
-  outer: while (true) {
+  while (true) {
     // Always re-read fresh state at the top of the outer loop — never trust
     // a snapshot carried across an await.
     const state = await getRunState()
     if (!state || !state.active) return
+    // This tab is no longer (or never was) the run's own tab — e.g. the run
+    // ended and a different run started elsewhere in the time since our last
+    // check. Stop driving immediately, but do NOT call stopRun()/
+    // clearRunState(): that would tear down a run this tab doesn't own. Just
+    // stand down silently; the owning tab's loop is responsible for its own
+    // stop conditions.
+    if (state.tabId !== myTabId) return
 
     const cap = isOverCap(state)
     if (cap === "leads") {
@@ -121,6 +156,7 @@ async function runAgentLoop() {
       // interrupt mid-batch, not only at the top of the outer loop.
       const beforeCard = await getRunState()
       if (!beforeCard || !beforeCard.active) return
+      if (beforeCard.tabId !== myTabId) return
       const capBeforeCard = isOverCap(beforeCard)
       if (capBeforeCard === "leads") {
         await stopRun("Reached lead limit")
@@ -147,6 +183,7 @@ async function runAgentLoop() {
         // run (glint_run reappearing with active: true after Stop).
         const fresh = await getRunState()
         if (!fresh || !fresh.active) return
+        if (fresh.tabId !== myTabId) return
         injectBadge(node, result.match_score, result.match_reasons)
         scoredThisBatch++
         fresh.leadCount++
@@ -166,14 +203,31 @@ async function runAgentLoop() {
     if (scoredThisBatch === 0) {
       staleRounds++
       if (staleRounds >= 3) {
-        await stopRun("No more new results found")
+        // Same symptom (3 stale rounds), two very different causes: either
+        // we truly reached the end of results, or NEXT_PAGE_SELECTOR never
+        // matched anything and we've been stuck on page 1 the whole time.
+        // Report them differently so this isn't indistinguishable from a
+        // successful complete run.
+        await stopRun(
+          paginationSucceededOnce
+            ? "No more new results found"
+            : "Couldn't find LinkedIn's next-page button — stopped after the first page of results."
+        )
         return
       }
     } else {
       staleRounds = 0
     }
 
-    if (!clickNextPage()) {
+    if (clickNextPage()) {
+      paginationSucceededOnce = true
+    } else {
+      if (!warnedAboutNextSelector) {
+        warnedAboutNextSelector = true
+        console.warn(
+          `Glint: NEXT_PAGE_SELECTOR ('${NEXT_PAGE_SELECTOR}') did not match a "Next" button — falling back to scroll. LinkedIn's markup may have changed.`
+        )
+      }
       window.scrollBy(0, window.innerHeight * 0.8)
     }
     await randomDelay(3000, 8000)
@@ -185,6 +239,12 @@ export default defineContentScript({
   main() {
     let agentActive = false
     let passiveStarted = false
+    // True for the whole lifetime of runAgentLoop() on THIS tab, from the
+    // moment it's launched until its promise settles. Used to stop the
+    // browser.storage.onChanged listener from re-arming passive mode while
+    // the agent loop is still unwinding (e.g. mid scoreLead()) after Stop —
+    // otherwise both modes can briefly score the same cards. See Fix 3.
+    let loopRunning = false
 
     // --- existing passive scan (unchanged behavior, gated off during a run) ---
     const seen = new Set<string>()
@@ -247,18 +307,32 @@ export default defineContentScript({
       if (area !== "local" || !changes.glint_run) return
       const newState = changes.glint_run.newValue as RunState | undefined
       agentActive = !!newState?.active
-      if (!agentActive) startPassive()
+      // Don't re-arm passive mode here if this tab's own agent loop is still
+      // unwinding (e.g. finishing a scoreLead() call after Stop cleared
+      // glint_run). runAgentLoop()'s .finally() below is the one that calls
+      // startPassive() once the loop has actually exited, sequencing the
+      // handoff instead of racing it.
+      if (!agentActive && !loopRunning) startPassive()
     })
 
-    // Resolve run state BEFORE doing any passive scanning or observing. On a
+    // Resolve BOTH this tab's own id and the run state BEFORE doing any
+    // passive scanning/observing or deciding to drive the agent loop. On a
     // search-results page the background just navigated to for a new run,
     // scanning synchronously at startup (before this resolves) would score
     // cards passively right before the agent gate closes — the exact
-    // double-scoring the run mode exists to prevent.
-    getRunState().then((state) => {
+    // double-scoring the run mode exists to prevent. And critically: only
+    // drive runAgentLoop() when this tab IS the run's own tab (state.tabId
+    // matches). Any other LinkedIn tab that loads or navigates during a run
+    // (e.g. a lead's profile opened in a new tab) must fall back to passive
+    // mode instead of independently scanning/paginating/mutating glint_run.
+    Promise.all([requestMyTabId(), getRunState()]).then(([myTabId, state]) => {
       agentActive = !!state?.active
-      if (agentActive) {
-        runAgentLoop()
+      if (agentActive && state && myTabId !== null && state.tabId === myTabId) {
+        loopRunning = true
+        runAgentLoop(myTabId).finally(() => {
+          loopRunning = false
+          startPassive()
+        })
       } else {
         startPassive()
       }
