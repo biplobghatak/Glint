@@ -283,8 +283,13 @@ export function LeadRow({
               )}
               <p className="text-xs whitespace-pre-wrap">{draft.opener}</p>
               <div className="flex items-center justify-between gap-2">
+                {/* The counter is only meaningful for a validated opener: the
+                    server enforces DRAFT_MAX_LEN on it. A fallback is the lead's
+                    match_reasons, never length-validated, so it can read
+                    "312/200" — a limit that looks broken. Show nothing there; the
+                    fallback already announces itself as a fallback above. */}
                 <span className="text-muted-foreground text-[11px] tabular-nums">
-                  {draft.opener.length}/{DRAFT_MAX_LEN}
+                  {!draft.isFallback && `${draft.opener.length}/${DRAFT_MAX_LEN}`}
                 </span>
                 <button
                   type="button"
@@ -294,6 +299,14 @@ export function LeadRow({
                   Send
                 </button>
               </div>
+              {/* "Send" is the label the user asked for, but Glint does not send
+                  anything: it writes the draft and opens the profile tab, where
+                  the content script fills LinkedIn's own note box. Spell that out
+                  so the label can't be mistaken for an automated send. */}
+              <p className="text-muted-foreground text-[10px]">
+                Opens the profile with your note filled in. You press LinkedIn's
+                Send.
+              </p>
             </div>
           )}
 

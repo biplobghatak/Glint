@@ -108,6 +108,35 @@ Deno.test("writes email and phone when present", async () => {
   restore()
 })
 
+Deno.test("an explicit email:null in the body IS written (overwrites); an absent email is not", async () => {
+  const restore = stubEnrichLeadBackend({
+    pairing: { user_id: "u1" },
+    matchedLead: { id: "l1" },
+  })
+
+  // An explicit `email: null` is a key PRESENT in the body, so the handler
+  // includes it in the UPDATE — overwriting any value already stored. This is
+  // exactly the data loss the background must avoid: a timed-out lookup must
+  // OMIT the key, never send null. This test pins that contract.
+  const res1 = await handler(makeReq({ device_token: "t", lead_id: "l1", email: null }))
+  await res1.json()
+  assertEquals(res1.status, 200)
+  assertEquals("email" in patchCalls[0].body, true)
+  assertEquals(patchCalls[0].body.email, null)
+
+  // An absent `email` key leaves the stored value alone — the key never reaches
+  // the UPDATE. This is the shape the background now sends when it captured
+  // nothing, so a real email from an earlier pass survives the replay.
+  const res2 = await handler(makeReq({ device_token: "t", lead_id: "l1" }))
+  await res2.json()
+  assertEquals(res2.status, 200)
+  assertEquals("email" in patchCalls[1].body, false)
+  // enriched_at is still stamped either way, so the lead reads "looked up".
+  assertEquals(typeof patchCalls[1].body.enriched_at, "string")
+
+  restore()
+})
+
 Deno.test("a lead_id belonging to another user is rejected and nothing is written", async () => {
   const restore = stubEnrichLeadBackend({
     pairing: { user_id: "u1" },

@@ -71,6 +71,17 @@ type PendingEnrich = {
 }
 const pendingEnrich = new Map<number, PendingEnrich>()
 
+// A background-held mirror of glint_run.openedTabIds. A content-script self-stop
+// (caps, commercial-limit banner, no-cards, InvalidFolderError, the "Something
+// went wrong" catch, the enrichment time cap) clears glint_run in the content
+// script and only THEN sends STOPPED — so by the time the STOPPED handler runs,
+// openedTabIds is already gone from storage and there is nothing left to sweep.
+// This in-memory copy is the only record of the run's tabs at STOPPED time, so
+// the handler can still close them. Kept in sync wherever openedTabIds is
+// mutated. It is lost on SW eviction — but the startup contact-info sweep in
+// defineBackground closes any orphan a lost mirror would otherwise leave behind.
+const openedTabIdsMirror = new Set<number>()
+
 // Records a tab this run opened so endRun() can guarantee it is closed. If the
 // run vanished between opening the tab and this write (a Stop that raced), the
 // tab has no owner that will ever close it — so close it here and now.
@@ -84,12 +95,14 @@ async function addOpenedTabId(tabId: number): Promise<void> {
     s.openedTabIds = [...s.openedTabIds, tabId]
     await setRunState(s)
   }
+  openedTabIdsMirror.add(tabId)
 }
 
 // Drops a contact-info tab from openedTabIds once it has been closed. A no-op
 // after the run was cleared (getRunState() === null), which is correct: endRun
 // already closed the tab and there is no list left to prune.
 async function removeOpenedTabId(tabId: number): Promise<void> {
+  openedTabIdsMirror.delete(tabId)
   const s = await getRunState()
   if (s && s.openedTabIds.includes(tabId)) {
     s.openedTabIds = s.openedTabIds.filter((id) => id !== tabId)
@@ -100,9 +113,17 @@ async function removeOpenedTabId(tabId: number): Promise<void> {
 // Writes enrichment onto a lead. Fail-soft by contract: any failure (unpaired,
 // network, non-2xx) is swallowed so a single bad lookup can never stop a run —
 // the card just stays "Not looked up yet" until a future run retries it. On the
-// common failure (a lookup that found nothing), email/phone are both null and
-// the server still stamps enriched_at, so the card reads "No public contact
+// common failure (a lookup that found nothing), NEITHER email nor phone is sent
+// and the server still stamps enriched_at, so the card reads "No public contact
 // info" instead.
+//
+// Only the keys we ACTUALLY extracted a value for are put in the body. The
+// enrich-lead handler writes any key PRESENT in the body — including an explicit
+// null — and leaves absent keys untouched. So sending `email: null` would
+// OVERWRITE a real email a previous pass captured; on a queue replay after a
+// tab reload that is silent loss of the exact data this slice exists to collect.
+// A null therefore becomes an ABSENT key, never an explicit null. enriched_at is
+// stamped unconditionally by the handler regardless of which keys are present.
 async function enrichLead(
   leadId: string,
   email: string | null,
@@ -111,13 +132,21 @@ async function enrichLead(
   try {
     const device_token = await getDeviceToken()
     if (!device_token) return
+    const body: {
+      device_token: string
+      lead_id: string
+      email?: string
+      phone?: string
+    } = { device_token, lead_id: leadId }
+    if (email !== null) body.email = email
+    if (phone !== null) body.phone = phone
     await fetch(`${env.WXT_SUPABASE_URL}/functions/v1/enrich-lead`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         apikey: env.WXT_SUPABASE_ANON_KEY,
       },
-      body: JSON.stringify({ device_token, lead_id: leadId, email, phone }),
+      body: JSON.stringify(body),
     })
   } catch (err) {
     console.debug("Glint: enrich-lead failed", leadId, err)
@@ -150,6 +179,11 @@ async function handleEnrich(
     return
   }
 
+  // The ideal is to record the tab id BEFORE the tab exists, so a crash can
+  // never leave an untracked tab open. That is literally impossible here:
+  // chrome.tabs.create is what MINTS the id, so there is nothing to record until
+  // it resolves. The startup contact-info sweep (see defineBackground) closes
+  // whatever this unavoidable window strands.
   let tab: chrome.tabs.Tab
   try {
     tab = await chrome.tabs.create({ url, active: false })
@@ -163,7 +197,6 @@ async function handleEnrich(
     sendResponse({ done: true })
     return
   }
-  await addOpenedTabId(contactTabId)
 
   let settled = false
   const finish = async (
@@ -183,7 +216,16 @@ async function handleEnrich(
   const timer = setTimeout(() => {
     void finish(null, null)
   }, ENRICH_TIMEOUT_MS)
+  // Register the pending entry BEFORE the addOpenedTabId storage round-trip
+  // below. The content script on the just-created contact-info tab can fire a
+  // CONTACT_INFO the instant it loads — often faster than that await resolves.
+  // With no entry yet, that message is dropped and the lookup only resolves via
+  // the 10s timeout as (null, null), falsely recording "No public contact info".
+  // The entry needs contactTabId (only known after create resolves), so this is
+  // as early as it can possibly go.
   pendingEnrich.set(contactTabId, { finish })
+
+  await addOpenedTabId(contactTabId)
 }
 
 // Every path that ends a run must also clear that run's badge, and the badge is
@@ -199,16 +241,26 @@ async function handleEnrich(
 // (enrich:false — a lookup cut short by Stop must not be recorded as "no contact
 // info") to unblock its waiting run tab, and finally openedTabIds is swept as a
 // belt-and-braces close of anything a pending entry didn't cover.
-async function endRun(): Promise<void> {
-  const state = await getRunState()
-  await clearRunState()
+// Aborts every in-flight lookup and closes every contact-info tab a run opened.
+// Shared by endRun (glint_run still readable, so its authoritative openedTabIds
+// is used) and the STOPPED handler (glint_run already cleared by a self-stop, so
+// only the in-memory mirror remains). Aborting with enrich:false is deliberate:
+// a lookup cut short by a stop must not be recorded as "no contact info".
+function sweepEnrichTabs(tabIds: Iterable<number>): void {
   const pendings = Array.from(pendingEnrich.values())
   pendingEnrich.clear()
   for (const p of pendings) p.finish(null, null, false)
-  if (state) {
-    clearBadge(state.tabId)
-    for (const id of state.openedTabIds) chrome.tabs.remove(id).catch(() => {})
-  }
+  for (const id of tabIds) chrome.tabs.remove(id).catch(() => {})
+  openedTabIdsMirror.clear()
+}
+
+async function endRun(): Promise<void> {
+  const state = await getRunState()
+  await clearRunState()
+  if (state) clearBadge(state.tabId)
+  // state.openedTabIds is authoritative when the run still exists; fall back to
+  // the mirror only if it was already cleared (shouldn't happen on this path).
+  sweepEnrichTabs(state ? state.openedTabIds : openedTabIdsMirror)
 }
 
 // Clears glint_run when it can no longer possibly be driven by any content
@@ -261,6 +313,29 @@ async function reconcileRunState(navigatedTabId?: number): Promise<void> {
       endRun()
     }
   })
+}
+
+// Startup sweep for contact-info orphans. handleEnrich creates the tab and only
+// then records its id (the id can't exist before create resolves — see the
+// comment there), so a SW eviction or a browser crash inside that window strands
+// a contact-info overlay tab with no owner to close it. On every SW start, find
+// every contact-info overlay tab and close any the current run doesn't claim —
+// all of them when there is no active run. Runs alongside reconcileRunState().
+async function sweepContactInfoOrphans(): Promise<void> {
+  try {
+    const tabs = await chrome.tabs.query({
+      url: "*://*.linkedin.com/in/*/overlay/contact-info/*",
+    })
+    const state = await getRunState()
+    const claimed = new Set(state?.active ? state.openedTabIds : [])
+    for (const tab of tabs) {
+      if (tab.id !== undefined && !claimed.has(tab.id)) {
+        chrome.tabs.remove(tab.id).catch(() => {})
+      }
+    }
+  } catch (err) {
+    console.debug("Glint: contact-info orphan sweep failed", err)
+  }
 }
 
 async function startRun(
@@ -383,6 +458,12 @@ export default defineBackground(() => {
     // no content script will ever match state.tabId again).
     reconcileRunState()
 
+    // Close any contact-info overlay tab a prior run left orphaned across this
+    // SW restart (crash/eviction inside handleEnrich's create-then-record
+    // window). Independent of reconcileRunState, which only handles the run's
+    // OWN tab.
+    sweepContactInfoOrphans()
+
     chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
       if (changeInfo.url !== undefined || changeInfo.status === "complete") {
         syncPanelForTab(tabId, tab.url)
@@ -437,6 +518,12 @@ export default defineBackground(() => {
         // rounds) by calling clearRunState() directly and announcing it here,
         // so this is the only place that learns the badge is now stale.
         if (sender.tab?.id !== undefined) clearBadge(sender.tab.id)
+        // clearRunState already ran in the content script, so glint_run — and
+        // its openedTabIds — is gone. Sweep the in-memory mirror instead, so a
+        // contact-info tab a self-stop opened isn't stranded. Same abort-then-
+        // close path endRun uses; the STOP_RUN branch above already covers the
+        // user-initiated stop via endRun.
+        sweepEnrichTabs(openedTabIdsMirror)
       } else if (message.type === "ENRICH") {
         // Async work, then sendResponse — return true (below) to hold the
         // channel open. handleEnrich validates the sender is the run's own tab.
