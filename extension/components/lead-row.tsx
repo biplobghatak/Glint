@@ -15,6 +15,12 @@ import {
 // what the DOM reports for "no value". The sentinel keeps the two apart.
 const UNFILED = "__unfiled"
 
+// Must equal MAX_OPENER_CHARS in supabase/functions/draft-opener/validate.ts,
+// which is where the limit is actually ENFORCED — the server rejects an opener
+// over it and never returns one. This copy exists only to draw the counter, and
+// cannot import that module (Deno source, not bundled into the extension). If
+// the real LinkedIn connection-note limit turns out not to be 200, both must
+// change together, or the counter will quietly disagree with the server.
 const DRAFT_MAX_LEN = 200
 
 type DraftState =
