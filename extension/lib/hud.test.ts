@@ -45,7 +45,7 @@ describe("renderHud", () => {
   it("empties the container on destroy", () => {
     const hud = renderHud(container, () => {})
     hud.destroy()
-    expect(container.querySelector("button")).toBeNull()
+    expect(container.children).toHaveLength(0)
   })
 
   it("destroy is safe to call twice", () => {
@@ -55,11 +55,17 @@ describe("renderHud", () => {
   })
 
   // After destroy the run is over. A late update() from an unwinding scan loop
-  // must not resurrect the HUD's DOM.
+  // must not resurrect the HUD's DOM. destroy() detaches the card from
+  // `container`, so asserting on container.textContent here would pass
+  // trivially (the whole card, status text included, is gone regardless of
+  // what update() does). Grab a live reference to the status node before
+  // destroy() so the assertion actually observes whether update() still
+  // writes into the (now-detached) DOM.
   it("ignores update after destroy", () => {
     const hud = renderHud(container, () => {})
+    const statusEl = container.querySelector(".glint-hud-status")!
     hud.destroy()
     hud.update({ status: "late" })
-    expect(container.textContent).not.toContain("late")
+    expect(statusEl.textContent).not.toContain("late")
   })
 })
