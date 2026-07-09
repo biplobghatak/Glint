@@ -66,7 +66,7 @@ export default function App() {
   }
 
   return (
-    <div className="flex h-full flex-col gap-4 p-4">
+    <div className="flex h-full flex-col gap-4 overflow-y-auto p-4">
       <h1 className="text-base font-semibold">Glint</h1>
       {!paired ? (
         <>
