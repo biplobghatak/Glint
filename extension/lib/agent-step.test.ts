@@ -14,6 +14,7 @@ const base: RunState = {
   maxMinutes: 20,
   page: 1,
   maxPages: 1,
+  folderId: null,
   seen: [],
   phase: "scanning",
 }

@@ -20,6 +20,12 @@ export type RunState = {
   page: number
   maxPages: number
   /**
+   * Where this run files its leads. `null` means unfiled. This is a DESTINATION,
+   * not a filter: LeadFilter.folderId's `""` sentinel ("unfiled") has no meaning
+   * here and must never be assigned to it.
+   */
+  folderId: string | null
+  /**
    * Normalised profile paths already scored this run. An array, not a Set:
    * chrome.storage.local serialises to JSON. The content script rehydrates it
    * into a Set on load and writes it back as an array. This is the piece that

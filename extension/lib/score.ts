@@ -27,7 +27,8 @@ export type ScoreResult = {
 }
 
 export async function scoreLead(
-  candidate: LeadCandidate
+  candidate: LeadCandidate,
+  folderId: string | null
 ): Promise<ScoreResult | null> {
   const device_token = await getDeviceToken()
   if (!device_token) return null
@@ -50,6 +51,7 @@ export async function scoreLead(
           linkedin_url: candidate.linkedin_url,
           source: candidate.source,
         },
+        folder_id: folderId,
       }),
     })
     if (!res.ok) return null

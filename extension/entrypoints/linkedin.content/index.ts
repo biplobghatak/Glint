@@ -222,7 +222,7 @@ async function runPageStep(myTabId: number, hud: HudHandle) {
     await settle()
     hud.update({ status: `Scoring ${cand.name ?? "a lead"}…` })
 
-    const result = await scoreLead(cand)
+    const result = await scoreLead(cand, initial.folderId)
 
     node.classList.remove(SCANNING_CLASS)
 
@@ -412,7 +412,7 @@ export default defineContentScript({
       draining = true
       while (queue.length) {
         const { node, cand } = queue.shift()!
-        const result = await scoreLead(cand)
+        const result = await scoreLead(cand, null)
         if (result) {
           injectBadge(node, result.match_score, result.match_reasons, result.min_score)
         }

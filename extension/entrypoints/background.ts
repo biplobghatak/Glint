@@ -111,7 +111,12 @@ async function reconcileRunState(navigatedTabId?: number): Promise<void> {
   })
 }
 
-async function startRun(query: string, tabId: number, maxPages: number) {
+async function startRun(
+  query: string,
+  tabId: number,
+  maxPages: number,
+  folderId: string | null
+) {
   try {
     const parsed = await parseQuery(query)
     const url = buildSearchUrl(parsed)
@@ -130,6 +135,7 @@ async function startRun(query: string, tabId: number, maxPages: number) {
       maxMinutes: DEFAULT_MAX_MINUTES,
       page: 1,
       maxPages,
+      folderId,
       seen: [],
       phase: "scanning",
     })
@@ -175,7 +181,11 @@ async function startRun(query: string, tabId: number, maxPages: number) {
 // and a second window's side panel is an independently mounted document that
 // has no idea another one already has a run active. glint_run is the only
 // shared source of truth, so it's checked here before we ever call startRun.
-async function handleStartRunMessage(query: string, maxPages: number) {
+async function handleStartRunMessage(
+  query: string,
+  maxPages: number,
+  folderId: string | null
+) {
   const state = await getRunState()
   if (state?.active) {
     sendMessage({
@@ -186,7 +196,7 @@ async function handleStartRunMessage(query: string, maxPages: number) {
   }
   chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
     if (tab?.id !== undefined && isLinkedIn(tab.url)) {
-      startRun(query, tab.id, maxPages)
+      startRun(query, tab.id, maxPages, folderId)
     } else {
       sendMessage({
         type: "RUN_ERROR",
@@ -246,7 +256,7 @@ export default defineBackground(() => {
     // instead of registering a listener that can never receive a message.
     chrome.runtime.onMessage.addListener((message: RuntimeMessage, sender, sendResponse) => {
       if (message.type === "START_RUN") {
-        handleStartRunMessage(message.query, message.maxPages)
+        handleStartRunMessage(message.query, message.maxPages, message.folderId)
       } else if (message.type === "STOP_RUN") {
         endRun()
       } else if (message.type === "NAVIGATE") {

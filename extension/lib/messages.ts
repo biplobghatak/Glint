@@ -1,4 +1,10 @@
-export type StartRunMessage = { type: "START_RUN"; query: string; maxPages: number }
+export type StartRunMessage = {
+  type: "START_RUN"
+  query: string
+  maxPages: number
+  /** Run destination. `null` means unfiled. Never `""`. */
+  folderId: string | null
+}
 export type StopRunMessage = { type: "STOP_RUN" }
 // Sent by the content script when a results page is exhausted and another
 // follows. The background owns tab navigation; see runPageStep's comment.
