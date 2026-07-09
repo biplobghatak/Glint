@@ -17,6 +17,11 @@ export type LeadRow = {
   status: LeadStatus
   folder_id: string | null
   created_at: string
+  avatar_url: string | null
+  email: string | null
+  phone: string | null
+  /** ISO timestamp of the last contact-info lookup. Null = never looked up. */
+  enriched_at: string | null
 }
 
 // Keyset cursor. Carries both ordering columns because the sort mode decides

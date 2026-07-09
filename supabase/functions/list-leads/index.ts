@@ -46,7 +46,7 @@ const SORTS: Record<SortKey, { col: "match_score" | "created_at"; asc: boolean }
 }
 
 const LEAD_COLUMNS =
-  "id, name, company, role, linkedin_url, location, country, match_score, match_reasons, status, folder_id, created_at"
+  "id, name, company, role, linkedin_url, location, country, match_score, match_reasons, status, folder_id, created_at, avatar_url, email, phone, enriched_at"
 
 type FolderRow = { id: string; name: string; lead_count: number }
 

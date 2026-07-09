@@ -468,6 +468,15 @@ verify_jwt = false
 import_map = "./functions/update-lead/deno.json"
 entrypoint = "./functions/update-lead/index.ts"
 
+# enrich-lead is likewise panel/extension-only, device_token authenticated,
+# and runs as the service role, so it checks lead ownership explicitly rather
+# than relying on RLS.
+[functions.enrich-lead]
+enabled = true
+verify_jwt = false
+import_map = "./functions/enrich-lead/deno.json"
+entrypoint = "./functions/enrich-lead/index.ts"
+
 # suggest-leads is panel-only and device_token authenticated. It is a pure
 # query: every lead it returns was already scored against the user's ICP by
 # score-lead, so no LLM call is involved.
