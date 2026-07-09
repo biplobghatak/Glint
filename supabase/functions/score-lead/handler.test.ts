@@ -29,6 +29,7 @@ function stubScoreLeadBackend(opts: {
   minScore: number
   llmScore?: number
   existingLead?: Existing | null
+  folder?: { id: string; user_id: string } | null
 }): () => void {
   insertedRows = []
   Deno.env.set("SUPABASE_URL", "http://db.test")
@@ -42,6 +43,9 @@ function stubScoreLeadBackend(opts: {
 
     if (url.includes("/rest/v1/extension_pairings")) {
       return json([{ user_id: "u1" }])
+    }
+    if (url.includes("/rest/v1/folders")) {
+      return json(opts.folder ? [opts.folder] : [])
     }
     if (url.includes("/rest/v1/leads") && method === "POST") {
       insertedRows.push(JSON.parse(String(init?.body)))
@@ -135,6 +139,63 @@ Deno.test("dedupe branch: stored=true, inserted=false, and nothing is written", 
   }))
   const body = await res.json()
 
+  assertEquals(body.stored, true)
+  assertEquals(body.inserted, false)
+  assertEquals(insertedRows.length, 0)
+  restore()
+})
+
+Deno.test("folder_id belonging to the caller is written onto the lead", async () => {
+  const restore = stubScoreLeadBackend({
+    minScore: 70,
+    llmScore: 90,
+    folder: { id: "f1", user_id: "u1" },
+  })
+  const res = await handler(
+    makeReq({ device_token: "t", profile_data: { name: "A" }, folder_id: "f1" })
+  )
+  assertEquals(res.status, 200)
+  assertEquals((insertedRows[0] as Record<string, unknown>).folder_id, "f1")
+  restore()
+})
+
+// A device_token is a bearer credential. An unvalidated folder id from one
+// would let a leaked token write into another user's folder.
+Deno.test("folder_id the caller does not own is rejected, and nothing is inserted", async () => {
+  const restore = stubScoreLeadBackend({ minScore: 70, llmScore: 90, folder: null })
+  const res = await handler(
+    makeReq({ device_token: "t", profile_data: { name: "A" }, folder_id: "someone-elses" })
+  )
+  const body = await res.json()
+  assertEquals(res.status, 400)
+  assertEquals(body.error, "invalid_folder")
+  assertEquals(insertedRows.length, 0)
+  restore()
+})
+
+Deno.test("no folder_id inserts an unfiled lead, exactly as before", async () => {
+  const restore = stubScoreLeadBackend({ minScore: 70, llmScore: 90 })
+  await handler(makeReq({ device_token: "t", profile_data: { name: "A" } }))
+  assertEquals((insertedRows[0] as Record<string, unknown>).folder_id, null)
+  restore()
+})
+
+// A lead already filed somewhere must not be silently relocated by an
+// unrelated search that happens to re-encounter it.
+Deno.test("the dedupe branch does not move an existing lead into the run's folder", async () => {
+  const restore = stubScoreLeadBackend({
+    minScore: 70,
+    existingLead: { id: "l1", match_score: 90, match_reasons: ["r"] },
+    folder: { id: "f1", user_id: "u1" },
+  })
+  const res = await handler(
+    makeReq({
+      device_token: "t",
+      profile_data: { name: "A", linkedin_url: "https://www.linkedin.com/in/a" },
+      folder_id: "f1",
+    })
+  )
+  const body = await res.json()
   assertEquals(body.stored, true)
   assertEquals(body.inserted, false)
   assertEquals(insertedRows.length, 0)

@@ -97,7 +97,12 @@ export async function handler(req: Request): Promise<Response> {
 
   const jsonHeaders = { ...corsHeaders, "content-type": "application/json" }
 
-  let body: { profile_data?: ProfileData; device_token?: string }
+  let body: {
+    profile_data?: ProfileData
+    device_token?: string
+    /** The run's destination folder. Absent or null means unfiled. */
+    folder_id?: string | null
+  }
   try {
     body = await req.json()
   } catch {
@@ -107,7 +112,7 @@ export async function handler(req: Request): Promise<Response> {
     })
   }
 
-  const { profile_data, device_token } = body
+  const { profile_data, device_token, folder_id } = body
   if (!device_token || !profile_data) {
     return new Response(JSON.stringify({ error: "missing_fields" }), {
       status: 400,
@@ -133,6 +138,24 @@ export async function handler(req: Request): Promise<Response> {
     })
   }
   const user_id = pairing.user_id
+
+  // A device_token is a bearer credential, so every id it carries is untrusted.
+  // Scope the lookup to this pairing's user_id: a folder that exists but belongs
+  // to someone else must be indistinguishable from one that does not exist.
+  if (folder_id) {
+    const { data: folder } = await supabase
+      .from("folders")
+      .select("id")
+      .eq("id", folder_id)
+      .eq("user_id", user_id)
+      .maybeSingle()
+    if (!folder) {
+      return new Response(JSON.stringify({ error: "invalid_folder" }), {
+        status: 400,
+        headers: jsonHeaders,
+      })
+    }
+  }
 
   if (profile_data.linkedin_url) {
     const { data: existing } = await supabase
@@ -246,6 +269,7 @@ export async function handler(req: Request): Promise<Response> {
       match_score: score.match_score,
       match_reasons: score.match_reasons,
       source: profile_data.source ?? "extension",
+      folder_id: folder_id ?? null,
     })
     .select("id")
     .single()
