@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import "../../styles/theme.css";
 
 /* App.tsx's root uses `h-full` (height: 100%), which resolves against its
    parent — so it collapses to content height unless html, body and #root all

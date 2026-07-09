@@ -56,18 +56,20 @@ export default function App() {
   }
 
   if (paired === null) {
-    return <div className="w-72 p-4 text-sm">Loading…</div>
+    return (
+      <div className="bg-background text-foreground w-72 p-4 text-sm">Loading…</div>
+    )
   }
 
   return (
-    <div className="flex w-72 flex-col gap-3 p-4">
+    <div className="bg-background text-foreground flex w-72 flex-col gap-3 p-4">
       <h1 className="text-base font-semibold">Glint</h1>
       {import.meta.env.BROWSER === "chrome" &&
         activeTab?.id !== undefined &&
         isLinkedIn(activeTab.url) && (
           <button
             onClick={handleOpenPanel}
-            className="rounded-md bg-black px-3 py-1.5 text-sm text-white"
+            className="bg-primary text-primary-foreground rounded-md px-3 py-1.5 text-sm font-medium transition-opacity hover:opacity-90"
           >
             Open Glint panel
           </button>
@@ -77,7 +79,7 @@ export default function App() {
           <p className="text-sm text-green-600">Extension paired ✓</p>
           <button
             onClick={handleUnpair}
-            className="rounded-md border px-3 py-1.5 text-sm"
+            className="border-border bg-card hover:bg-accent rounded-md border px-3 py-1.5 text-sm transition-colors"
           >
             Unpair
           </button>
@@ -91,18 +93,18 @@ export default function App() {
             value={code}
             onChange={(e) => setCode(e.target.value)}
             placeholder="XXXXXXXX"
-            className="rounded-md border px-3 py-1.5 font-mono tracking-widest uppercase"
+            className="border-border bg-card rounded-md border px-3 py-1.5 font-mono tracking-widest uppercase focus-visible:ring-2 focus-visible:ring-ring outline-none"
             required
           />
           <button
             type="submit"
             disabled={busy}
-            className="rounded-md bg-black px-3 py-1.5 text-sm text-white disabled:opacity-50"
+            className="bg-primary text-primary-foreground rounded-md px-3 py-1.5 text-sm font-medium transition-opacity hover:opacity-90 disabled:opacity-50"
           >
             {busy ? "Pairing…" : "Pair"}
           </button>
           {error && (
-            <p className="text-sm text-red-600">
+            <p className="text-destructive text-sm">
               Invalid or expired code. Generate a new one.
             </p>
           )}

@@ -62,12 +62,21 @@ export default function App() {
   }
 
   if (paired === null) {
-    return <div className="p-4 text-sm">Loading…</div>
+    return (
+      <div className="bg-background text-foreground flex h-full items-center justify-center p-4 text-sm">
+        Loading…
+      </div>
+    )
   }
 
   return (
-    <div className="flex h-full flex-col gap-4 overflow-y-auto p-4">
-      <h1 className="text-base font-semibold">Glint</h1>
+    <div className="bg-background text-foreground flex h-full flex-col gap-4 overflow-y-auto p-4">
+      <header className="flex flex-col gap-0.5">
+        <h1 className="text-base font-semibold">Glint</h1>
+        <p className="text-muted-foreground text-xs">
+          Find and score LinkedIn leads against your ICP
+        </p>
+      </header>
       {!paired ? (
         <>
           <p className="text-muted-foreground text-sm">
@@ -77,7 +86,7 @@ export default function App() {
             <button
               type="button"
               onClick={handleStop}
-              className="rounded-md border px-3 py-1.5 text-sm"
+              className="border-border bg-card hover:bg-accent rounded-[var(--radius)] border px-3 py-1.5 text-sm transition-colors"
             >
               Stop
             </button>
@@ -86,19 +95,19 @@ export default function App() {
       ) : (
         <>
           <form onSubmit={handleStart} className="flex flex-col gap-2">
-            <label className="text-sm">Who are you looking for?</label>
+            <label className="text-sm font-medium">Who are you looking for?</label>
             <textarea
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder="Find me CEOs of ecommerce startups"
-              className="min-h-20 rounded-md border px-3 py-1.5 text-sm"
+              className="border-border bg-card min-h-20 resize-none rounded-[var(--radius)] border px-3 py-1.5 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
               required
               disabled={running}
             />
             {!running ? (
               <button
                 type="submit"
-                className="rounded-md bg-black px-3 py-1.5 text-sm text-white disabled:opacity-50"
+                className="bg-primary text-primary-foreground rounded-[var(--radius)] px-3 py-1.5 text-sm font-medium transition-opacity hover:opacity-90 disabled:opacity-50"
                 disabled={query.trim().length === 0}
               >
                 Start
@@ -107,17 +116,34 @@ export default function App() {
               <button
                 type="button"
                 onClick={handleStop}
-                className="rounded-md border px-3 py-1.5 text-sm"
+                className="border-border bg-card hover:bg-accent rounded-[var(--radius)] border px-3 py-1.5 text-sm transition-colors"
               >
                 Stop
               </button>
             )}
           </form>
-          {error && <p className="text-sm text-red-600">{error}</p>}
+          {error && <p className="text-destructive text-sm">{error}</p>}
           {(running || status) && (
-            <div className="rounded-md border p-3 text-sm">
-              <p>Leads found: {leadCount}</p>
-              {status && <p className="text-muted-foreground">{status}</p>}
+            <div className="border-border bg-card flex flex-col gap-1 rounded-[var(--radius)] border p-3 text-sm">
+              <div className="flex items-center justify-between">
+                <span className="text-2xl font-semibold tabular-nums">{leadCount}</span>
+                <span
+                  className={
+                    "flex items-center gap-1.5 text-xs font-medium " +
+                    (running ? "text-primary" : "text-muted-foreground")
+                  }
+                >
+                  <span
+                    className={
+                      "h-1.5 w-1.5 rounded-full " +
+                      (running ? "bg-primary animate-pulse" : "bg-muted-foreground")
+                    }
+                  />
+                  {running ? "Running" : "Idle"}
+                </span>
+              </div>
+              <p className="text-muted-foreground text-xs">Leads found</p>
+              {status && <p className="text-muted-foreground border-border mt-1 border-t pt-1 text-xs">{status}</p>}
             </div>
           )}
         </>
