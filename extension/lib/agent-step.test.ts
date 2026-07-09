@@ -16,6 +16,8 @@ const base: RunState = {
   maxPages: 1,
   folderId: null,
   seen: [],
+  enrichQueue: [],
+  openedTabIds: [],
   phase: "scanning",
 }
 

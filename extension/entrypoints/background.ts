@@ -1,10 +1,20 @@
 import { isLinkedIn } from "@/lib/linkedin"
 import { parseQuery, buildSearchUrl, UnpairedError, NoIcpError, QueryServiceError, NetworkError } from "@/lib/query"
 import { getRunState, setRunState, clearRunState } from "@/lib/run"
-import { sendRuntimeMessage, type RuntimeMessage, type WhichTabResponse } from "@/lib/messages"
+import { getDeviceToken } from "@/lib/pairing"
+import { sendRuntimeMessage, type RuntimeMessage, type WhichTabResponse, type EnrichResponse } from "@/lib/messages"
 
 const DEFAULT_MAX_LEADS = 100
 const DEFAULT_MAX_MINUTES = 20
+
+// How long a single contact-info lookup may take before it is abandoned. A tab
+// that never loads, a 302 to the profile, or a modal that renders nothing all
+// hit this. On expiry the lead is enriched with nulls anyway (so enriched_at is
+// stamped and the card reads "No public contact info" rather than "Not looked up
+// yet" forever) and the run continues. A failed lookup must never stop a run.
+const ENRICH_TIMEOUT_MS = 10_000
+
+const env = import.meta.env as unknown as Record<string, string>
 
 // Thrown when the run state was persisted successfully but navigating the
 // tab to the search URL failed (blocked/disallowed navigation, discarded
@@ -49,14 +59,156 @@ function clearBadge(tabId: number) {
   chrome.action.setBadgeText({ tabId, text: "" }).catch(() => {})
 }
 
+// An in-flight contact-info lookup, keyed by the contact-info tab's id. In
+// memory only: this map exists solely to correlate an incoming CONTACT_INFO to
+// the tab we opened for it. If the service worker is evicted mid-lookup the
+// ENRICH promise rejects, the run tab fails soft and moves on, and the opened
+// tab is still recorded in glint_run.openedTabIds — so endRun/reconcile close it
+// regardless. `finish` is idempotent (guarded by `settled`); calling it with
+// enrich:false abandons the lookup without writing enrichment (used on Stop).
+type PendingEnrich = {
+  finish: (email: string | null, phone: string | null, enrich?: boolean) => void
+}
+const pendingEnrich = new Map<number, PendingEnrich>()
+
+// Records a tab this run opened so endRun() can guarantee it is closed. If the
+// run vanished between opening the tab and this write (a Stop that raced), the
+// tab has no owner that will ever close it — so close it here and now.
+async function addOpenedTabId(tabId: number): Promise<void> {
+  const s = await getRunState()
+  if (!s?.active) {
+    chrome.tabs.remove(tabId).catch(() => {})
+    return
+  }
+  if (!s.openedTabIds.includes(tabId)) {
+    s.openedTabIds = [...s.openedTabIds, tabId]
+    await setRunState(s)
+  }
+}
+
+// Drops a contact-info tab from openedTabIds once it has been closed. A no-op
+// after the run was cleared (getRunState() === null), which is correct: endRun
+// already closed the tab and there is no list left to prune.
+async function removeOpenedTabId(tabId: number): Promise<void> {
+  const s = await getRunState()
+  if (s && s.openedTabIds.includes(tabId)) {
+    s.openedTabIds = s.openedTabIds.filter((id) => id !== tabId)
+    await setRunState(s)
+  }
+}
+
+// Writes enrichment onto a lead. Fail-soft by contract: any failure (unpaired,
+// network, non-2xx) is swallowed so a single bad lookup can never stop a run —
+// the card just stays "Not looked up yet" until a future run retries it. On the
+// common failure (a lookup that found nothing), email/phone are both null and
+// the server still stamps enriched_at, so the card reads "No public contact
+// info" instead.
+async function enrichLead(
+  leadId: string,
+  email: string | null,
+  phone: string | null
+): Promise<void> {
+  try {
+    const device_token = await getDeviceToken()
+    if (!device_token) return
+    await fetch(`${env.WXT_SUPABASE_URL}/functions/v1/enrich-lead`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        apikey: env.WXT_SUPABASE_ANON_KEY,
+      },
+      body: JSON.stringify({ device_token, lead_id: leadId, email, phone }),
+    })
+  } catch (err) {
+    console.debug("Glint: enrich-lead failed", leadId, err)
+  }
+}
+
+// Opens the lead's contact-info overlay in a background tab, waits for the
+// content script there to report (or the timeout), enriches the lead, closes the
+// tab, and answers the waiting run tab. Serial by construction: the run tab
+// awaits our sendResponse before it asks for the next lead, so exactly one
+// background tab is ever open at a time.
+async function handleEnrich(
+  leadId: string,
+  url: string,
+  senderTabId: number | undefined,
+  sendResponse: (r: EnrichResponse) => void
+): Promise<void> {
+  const state = await getRunState()
+  // Only the run's own tab may drive enrichment, and only to a LinkedIn URL —
+  // a content script is the least-trusted sender, and tabs.create is a
+  // navigation primitive. On any mismatch, answer immediately so the run tab
+  // isn't left awaiting a reply that never comes.
+  if (
+    senderTabId === undefined ||
+    !state?.active ||
+    state.tabId !== senderTabId ||
+    !isLinkedIn(url)
+  ) {
+    sendResponse({ done: true })
+    return
+  }
+
+  let tab: chrome.tabs.Tab
+  try {
+    tab = await chrome.tabs.create({ url, active: false })
+  } catch (err) {
+    console.debug("Glint: enrich tab create failed", err)
+    sendResponse({ done: true })
+    return
+  }
+  const contactTabId = tab.id
+  if (contactTabId === undefined) {
+    sendResponse({ done: true })
+    return
+  }
+  await addOpenedTabId(contactTabId)
+
+  let settled = false
+  const finish = async (
+    email: string | null,
+    phone: string | null,
+    enrich = true
+  ) => {
+    if (settled) return
+    settled = true
+    clearTimeout(timer)
+    pendingEnrich.delete(contactTabId)
+    if (enrich) await enrichLead(leadId, email, phone)
+    chrome.tabs.remove(contactTabId).catch(() => {})
+    await removeOpenedTabId(contactTabId)
+    sendResponse({ done: true })
+  }
+  const timer = setTimeout(() => {
+    void finish(null, null)
+  }, ENRICH_TIMEOUT_MS)
+  pendingEnrich.set(contactTabId, { finish })
+}
+
 // Every path that ends a run must also clear that run's badge, and the badge is
 // keyed by the run's own tab id — which is only knowable from glint_run. Reading
 // it before clearing is therefore not an optimization; skipping it strands a
 // stale count on the toolbar for the life of the tab.
+//
+// It must ALSO close every background tab the run opened for contact-info
+// lookups. A run stopped mid-enrichment otherwise leaves invisible tabs the user
+// never opened — the single worst failure mode in the enrichment path. State is
+// cleared FIRST so the finish() calls below (and any late CONTACT_INFO) see a
+// dead run and don't rewrite openedTabIds; then every pending lookup is aborted
+// (enrich:false — a lookup cut short by Stop must not be recorded as "no contact
+// info") to unblock its waiting run tab, and finally openedTabIds is swept as a
+// belt-and-braces close of anything a pending entry didn't cover.
 async function endRun(): Promise<void> {
   const state = await getRunState()
   await clearRunState()
-  if (state) clearBadge(state.tabId)
+  const pendings = Array.from(pendingEnrich.values())
+  pendingEnrich.clear()
+  for (const p of pendings) p.finish(null, null, false)
+  if (state) {
+    clearBadge(state.tabId)
+    for (const id of state.openedTabIds) chrome.tabs.remove(id).catch(() => {})
+  }
 }
 
 // Clears glint_run when it can no longer possibly be driven by any content
@@ -137,6 +289,8 @@ async function startRun(
       maxPages,
       folderId,
       seen: [],
+      enrichQueue: [],
+      openedTabIds: [],
       phase: "scanning",
     })
     try {
@@ -283,6 +437,20 @@ export default defineBackground(() => {
         // rounds) by calling clearRunState() directly and announcing it here,
         // so this is the only place that learns the badge is now stale.
         if (sender.tab?.id !== undefined) clearBadge(sender.tab.id)
+      } else if (message.type === "ENRICH") {
+        // Async work, then sendResponse — return true (below) to hold the
+        // channel open. handleEnrich validates the sender is the run's own tab.
+        handleEnrich(message.leadId, message.url, sender.tab?.id, sendResponse)
+        return true
+      } else if (message.type === "CONTACT_INFO") {
+        // The least-trusted sender in the extension. It is only honoured when it
+        // comes from a tab THIS run opened for a lookup — i.e. one with a pending
+        // entry. Anything else (a stray content script, a spoofed message) has
+        // no entry and is silently dropped.
+        const tabId = sender.tab?.id
+        if (tabId === undefined) return
+        const entry = pendingEnrich.get(tabId)
+        if (entry) entry.finish(message.email, message.phone)
       } else if (message.type === "WHICH_TAB") {
         // Answer synchronously (no await needed), but we must still return
         // `true` here — and only here — to tell Chrome to keep the message
@@ -296,8 +464,12 @@ export default defineBackground(() => {
 
     chrome.tabs.onRemoved.addListener(async (closedTabId) => {
       const state = await getRunState()
+      // Only the run's OWN tab closing ends the run. A contact-info tab closing
+      // (by us, or by the user) is expected — its pending lookup times out and
+      // the run carries on. endRun (not clearRunState) so any other background
+      // tabs this run opened are closed too, not stranded.
       if (state?.active && state.tabId === closedTabId) {
-        await clearRunState()
+        await endRun()
       }
     })
   }

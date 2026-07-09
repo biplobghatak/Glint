@@ -10,6 +10,13 @@ export class InvalidFolderError extends Error {}
 // whether a badge is muted without a second round-trip per card. It is the
 // user's icps.min_score, not a property of this lead.
 export type ScoreResult = {
+  /**
+   * The id of the `leads` row. Present only on the fresh-insert path — the run
+   * uses it to queue the lead for a contact-info visit. Absent for a discard
+   * (below min_score, nothing stored) and for a dedupe hit that returns the
+   * existing row without re-enriching it this run.
+   */
+  lead_id?: string
   match_score: number
   match_reasons: string[]
   min_score: number

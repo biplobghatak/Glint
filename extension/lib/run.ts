@@ -3,7 +3,7 @@ import type { ParsedQuery } from "@/lib/query"
 
 const RUN_KEY = "glint_run"
 
-export type RunPhase = "scanning" | "paginating"
+export type RunPhase = "scanning" | "enriching" | "paginating"
 
 export type RunState = {
   active: boolean
@@ -33,6 +33,22 @@ export type RunState = {
    * would re-score everything it had already seen.
    */
   seen: string[]
+  /**
+   * Leads STORED on the current page that still need a contact-info visit.
+   * Populated during the card loop (one entry per `result.inserted` lead), drained
+   * by the enrichment pass, then emptied before pagination. Persisted like `seen`
+   * because it rides through chrome.storage.local as JSON.
+   */
+  enrichQueue: { leadId: string; profilePath: string }[]
+  /**
+   * Background tabs this run opened for contact-info lookups. Every one MUST be
+   * closed when the run ends — the background owns tab lifecycle, so endRun()
+   * reads this and closes each. A run stopped mid-enrichment otherwise strands
+   * invisible tabs the user never opened. This is the worst failure mode in the
+   * enrichment path, so the list lives in persisted state, not memory: it must
+   * survive a service-worker eviction between opening a tab and closing it.
+   */
+  openedTabIds: number[]
   phase: RunPhase
 }
 

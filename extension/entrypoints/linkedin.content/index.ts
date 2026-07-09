@@ -4,10 +4,12 @@ import { createShadowRootUi } from "wxt/utils/content-script-ui/shadow-root"
 import { extractFromNode, findSearchResultCards, type LeadCandidate } from "@/lib/extract"
 import { scoreLead, InvalidFolderError } from "@/lib/score"
 import { getRunState, setRunState, clearRunState, type RunState } from "@/lib/run"
-import { sendRuntimeMessage, type RuntimeMessage, type WhichTabMessage, type WhichTabResponse } from "@/lib/messages"
+import { sendRuntimeMessage, type RuntimeMessage, type WhichTabMessage, type WhichTabResponse, type EnrichMessage, type EnrichResponse } from "@/lib/messages"
 import { consumeDraft } from "@/lib/draft"
 import { buildSearchUrl } from "@/lib/query"
 import { nextAction } from "@/lib/agent-step"
+import { isContactInfoPath, extractContactInfo, CONTACT_INFO_PATH } from "@/lib/contact"
+import { profilePathFromUrl, nextEnrichStep } from "@/lib/enrich"
 import { renderHud, HUD_TAG, type HudHandle } from "@/lib/hud"
 import { formatScore } from "@/lib/format"
 import { renderDraftCard } from "./draft-card"
@@ -135,6 +137,25 @@ function postProgress(leadCount: number, status: string) {
   sendMessage({ type: "PROGRESS", leadCount, status })
 }
 
+// Runs ONLY on a contact-info overlay tab (see the gate in main). Reports what
+// extractContactInfo finds to the background, which correlates it to the pending
+// lookup by this tab's id. The overlay is usually in the initial HTML, but a
+// slow render must not be reported as "no contact info" — so poll briefly,
+// resolving the instant anything is found, and otherwise report nulls well
+// inside the background's 10s cap (both null is a legitimate answer the caller
+// still stamps enriched_at for). Fire-and-forget: no response is awaited.
+async function reportContactInfo(): Promise<void> {
+  for (let i = 0; i < 20; i++) {
+    const info = extractContactInfo(document)
+    if (info.email || info.phone) {
+      sendRuntimeMessage({ type: "CONTACT_INFO", email: info.email, phone: info.phone })
+      return
+    }
+    await new Promise((r) => setTimeout(r, 200))
+  }
+  sendRuntimeMessage({ type: "CONTACT_INFO", email: null, phone: null })
+}
+
 const SCROLL_SETTLE_MS = 350
 
 /** Give a smooth scroll time to land before we start scoring what it revealed. */
@@ -253,7 +274,21 @@ async function runPageStep(myTabId: number, hud: HudHandle) {
       // toward a cap that exists to bound NEW work — so gate on `inserted`, not
       // `stored`. A card badged muted was scored and discarded; counting either
       // would inflate the total and trip the cap early.
-      if (result.inserted) fresh.leadCount++
+      if (result.inserted) {
+        fresh.leadCount++
+        // Queue for a contact-info visit — but ONLY on a fresh insert. A
+        // sub-threshold lead was never stored and has no lead_id; a dedupe hit
+        // (stored:true, inserted:false) already exists and is not re-enriched by
+        // this run. lead_id rides on the fresh-insert response; profilePathFromUrl
+        // returns null for a lead with no usable /in/ URL, which we simply skip.
+        const profilePath = profilePathFromUrl(cand.linkedin_url)
+        if (result.lead_id && profilePath) {
+          fresh.enrichQueue = [
+            ...fresh.enrichQueue,
+            { leadId: result.lead_id, profilePath },
+          ]
+        }
+      }
     }
     await setRunState(fresh)
 
@@ -280,10 +315,21 @@ async function runPageStep(myTabId: number, hud: HudHandle) {
     return
   }
 
-  // The page is done. nextAction decides whether another one follows.
+  // The page is scored. Before paginating, visit each STORED lead's contact-info
+  // overlay in a background tab and enrich it — serially, announced, fail-soft.
+  const scanned = await getRunState()
+  if (!scanned || !scanned.active || scanned.tabId !== myTabId) return
+  scanned.phase = "enriching"
+  await setRunState(scanned)
+  await runEnrichment(myTabId, hud)
+
+  // The page is done. nextAction decides whether another one follows. Enrichment
+  // is best-effort and may have stopped the run (Stop, time cap) — re-read and
+  // bail if so. The queue is emptied here so the next page starts clean.
   const done = await getRunState()
   if (!done || !done.active || done.tabId !== myTabId) return
   done.phase = "paginating"
+  done.enrichQueue = []
   await setRunState(done)
 
   const decision = nextAction(done, Date.now())
@@ -303,6 +349,51 @@ async function runPageStep(myTabId: number, hud: HudHandle) {
     // reconcileRunState() watches chrome.tabs.onUpdated to notice a run tab
     // leaving LinkedIn. Two owners would make that reconciliation lie.
     sendMessage({ type: "NAVIGATE", url: buildSearchUrl(done.parsed, decision.page) })
+  }
+}
+
+// Asks the background to run one contact-info lookup and awaits its completion.
+// Awaiting the response is what serialises the pass: the background opens exactly
+// one background tab, enriches, closes it, and only then replies — so the next
+// lookup can't start until this one is fully done. A rejection (service worker
+// gone, channel torn down) is the caller's problem to swallow; a failed lookup
+// must never stop a run.
+async function requestEnrich(leadId: string, url: string): Promise<void> {
+  ;(await chrome.runtime.sendMessage({
+    type: "ENRICH",
+    leadId,
+    url,
+  } satisfies EnrichMessage)) as EnrichResponse | undefined
+}
+
+// Visits every lead stored on this page, in series, and enriches it with the
+// email/phone from its contact-info overlay. Announced in the HUD; never
+// parallel; never fatal. State is re-read each step so Stop and the time cap
+// interrupt between leads — the lead cap deliberately does not (see nextEnrichStep).
+async function runEnrichment(myTabId: number, hud: HudHandle): Promise<void> {
+  let index = 0
+  for (;;) {
+    const state = await getRunState()
+    if (!state || !state.active || state.tabId !== myTabId) return
+    const step = nextEnrichStep(state, index, Date.now())
+    if (step.kind === "done") return
+    if (step.kind === "stop") {
+      await stopRun(step.reason)
+      return
+    }
+    hud.update({ status: step.label })
+    const url = `${location.origin}${CONTACT_INFO_PATH(step.profilePath)}`
+    try {
+      await requestEnrich(step.leadId, url)
+    } catch (err) {
+      // A failed lookup must never stop a run: swallow and move on. The
+      // background enriches with nulls on its own 10s timeout, so enriched_at is
+      // still stamped in the ordinary failure cases.
+      console.debug("Glint: enrich request failed", err)
+    }
+    index++
+    // Pace like the card loop — one background tab at a time, never a burst.
+    await randomDelay(400, 900)
   }
 }
 
@@ -354,6 +445,15 @@ export default defineContentScript({
   // root instead of injecting it into LinkedIn's document.
   cssInjectionMode: "ui",
   main(ctx) {
+    // A contact-info overlay tab is a background tab the run itself opened to
+    // read one lead's email/phone. It must do NOTHING else here — no scanning,
+    // no HUD, no badging, no passive drain — so this is gated FIRST, before any
+    // other work. Extract, report, and return.
+    if (isContactInfoPath(location.pathname)) {
+      void reportContactInfo()
+      return
+    }
+
     // Independent of the scan/agent machinery below: a profile page has no
     // result cards, and a search page has no pending draft.
     mountDraftCard(ctx).catch((err) =>
