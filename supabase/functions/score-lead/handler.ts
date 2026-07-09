@@ -165,6 +165,10 @@ export async function handler(req: Request): Promise<Response> {
           match_score: existing.match_score,
           match_reasons: existing.match_reasons,
           min_score: icpRow?.min_score ?? DEFAULT_MIN_SCORE,
+          // A row exists for this lead. The dedupe branch never re-scores, so
+          // it also never re-evaluates the threshold: a lead stored under an
+          // older, lower min_score stays stored.
+          stored: true,
         }),
         { headers: jsonHeaders }
       )
@@ -205,6 +209,25 @@ export async function handler(req: Request): Promise<Response> {
     })
   }
 
+  // Computed, returned, discarded. Returning the score regardless is what keeps
+  // the muted badge on the card: absence of a badge must always mean "Glint has
+  // not scored this", never "Glint scored it low".
+  //
+  // Not a one-way door. The dedupe branch above keys on an existing row, and a
+  // discarded lead has none, so re-running the same search re-scores it and
+  // stores it under a lower threshold. What is lost is the LLM call.
+  if (score.match_score < icp.min_score) {
+    return new Response(
+      JSON.stringify({
+        match_score: score.match_score,
+        match_reasons: score.match_reasons,
+        min_score: icp.min_score,
+        stored: false,
+      }),
+      { headers: jsonHeaders }
+    )
+  }
+
   const { data: inserted, error: insertError } = await supabase
     .from("leads")
     .insert({
@@ -236,6 +259,7 @@ export async function handler(req: Request): Promise<Response> {
       match_score: score.match_score,
       match_reasons: score.match_reasons,
       min_score: (icp as Icp).min_score ?? DEFAULT_MIN_SCORE,
+      stored: true,
     }),
     { headers: jsonHeaders }
   )
