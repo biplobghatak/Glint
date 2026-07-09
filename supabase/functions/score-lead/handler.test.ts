@@ -201,3 +201,268 @@ Deno.test("the dedupe branch does not move an existing lead into the run's folde
   assertEquals(insertedRows.length, 0)
   restore()
 })
+
+// ---------------------------------------------------------------------------
+// Batch path: `profiles` present. One LLM call for the whole page. `index` is
+// load-bearing — a score must be matched back to its profile by the index the
+// model echoes, never by array position, or a reordered/partial response would
+// silently write a stranger's score onto a lead.
+// ---------------------------------------------------------------------------
+
+type BatchScoreItem = {
+  index: number
+  match_score: number
+  match_reasons: string[]
+  country: string | null
+}
+
+type ExistingLead = {
+  id: string
+  linkedin_url: string
+  match_score: number
+  match_reasons: string[]
+}
+
+let llmCallCount = 0
+// The parsed body of the last LLM request, so tests can assert max_tokens scaled
+// with the batch (an under-budgeted call truncates the JSON and fails the page).
+let lastLlmBody: Record<string, unknown> | null = null
+
+function stubBatchBackend(opts: {
+  minScore: number
+  scores?: BatchScoreItem[]
+  existingLeads?: ExistingLead[]
+  folder?: { id: string; user_id: string } | null
+}): () => void {
+  insertedRows = []
+  llmCallCount = 0
+  lastLlmBody = null
+  Deno.env.set("SUPABASE_URL", "http://db.test")
+  Deno.env.set("SUPABASE_SERVICE_ROLE_KEY", "k")
+  Deno.env.set("OPENROUTER_API_KEY", "k")
+
+  const original = globalThis.fetch
+  globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+    const url = String(input)
+    const method = init?.method ?? "GET"
+
+    if (url.includes("/rest/v1/extension_pairings")) {
+      return json([{ user_id: "u1" }])
+    }
+    if (url.includes("/rest/v1/folders")) {
+      return json(opts.folder ? [opts.folder] : [])
+    }
+    if (url.includes("/rest/v1/leads") && method === "POST") {
+      const rows = JSON.parse(String(init?.body)) as Array<Record<string, unknown>>
+      for (const r of rows) insertedRows.push(r)
+      // One id per row, in the order inserted, so lead_id matching is exercised.
+      return json(rows.map((r, i) => ({ id: `new-${i}`, linkedin_url: r.linkedin_url })))
+    }
+    if (url.includes("/rest/v1/leads")) {
+      // The single dedupe query: select ... where linkedin_url in (...).
+      return json(opts.existingLeads ?? [])
+    }
+    if (url.includes("/rest/v1/icps")) {
+      return json([{
+        min_score: opts.minScore,
+        target_roles: [],
+        company_types: [],
+        pain_points: [],
+        raw_summary: null,
+      }])
+    }
+    // Anything left is the LLM.
+    llmCallCount++
+    lastLlmBody = JSON.parse(String(init?.body))
+    return json({
+      choices: [{ message: { content: JSON.stringify({ scores: opts.scores ?? [] }) } }],
+    })
+  }) as typeof fetch
+
+  return () => {
+    globalThis.fetch = original
+  }
+}
+
+const P = (n: string, url?: string): Record<string, unknown> =>
+  url ? { name: n, linkedin_url: url } : { name: n }
+
+Deno.test("batch of 3 with one dedupe hit: one LLM call, two inserted, the hit is not re-scored", async () => {
+  const restore = stubBatchBackend({
+    minScore: 70,
+    existingLeads: [
+      { id: "l-mid", linkedin_url: "https://li/b", match_score: 88, match_reasons: ["existing"] },
+    ],
+    scores: [
+      { index: 0, match_score: 80, match_reasons: ["a"], country: "US" },
+      { index: 1, match_score: 75, match_reasons: ["c"], country: null },
+    ],
+  })
+  const res = await handler(makeReq({
+    device_token: "t",
+    profiles: [
+      P("A", "https://li/a"),
+      P("B", "https://li/b"), // dedupe hit
+      P("C", "https://li/c"),
+    ],
+  }))
+  const body = await res.json()
+
+  assertEquals(res.status, 200)
+  // One LLM call for the whole page — the point of the task.
+  assertEquals(llmCallCount, 1)
+  // Two rows inserted; the dedupe hit was not re-inserted.
+  assertEquals(insertedRows.length, 2)
+  // Results are in input order and echo each linkedin_url.
+  assertEquals(body.results.length, 3)
+  assertEquals(body.results.map((r: { linkedin_url: string }) => r.linkedin_url), [
+    "https://li/a",
+    "https://li/b",
+    "https://li/c",
+  ])
+  // A and C were scored and inserted.
+  assertEquals(body.results[0].inserted, true)
+  assertEquals(body.results[0].match_score, 80)
+  assertEquals(body.results[2].inserted, true)
+  assertEquals(body.results[2].match_score, 75)
+  // The middle one is the dedupe hit: stored, not inserted, its old score kept
+  // (the LLM never scored it, so it cannot have been re-scored).
+  assertEquals(body.results[1].stored, true)
+  assertEquals(body.results[1].inserted, false)
+  assertEquals(body.results[1].match_score, 88)
+  assertEquals(body.results[1].lead_id, "l-mid")
+  // maxTokens scaled with the batch: 256 + 160 * 3.
+  assertEquals(lastLlmBody?.max_tokens, 256 + 160 * 3)
+  restore()
+})
+
+Deno.test("batch below min_score: stored=false but match_score and match_reasons still present", async () => {
+  const restore = stubBatchBackend({
+    minScore: 70,
+    scores: [{ index: 0, match_score: 42, match_reasons: ["weak"], country: null }],
+  })
+  const res = await handler(makeReq({
+    device_token: "t",
+    profiles: [P("A", "https://li/a")],
+  }))
+  const body = await res.json()
+
+  assertEquals(body.results.length, 1)
+  assertEquals(body.results[0].stored, false)
+  assertEquals(body.results[0].inserted, false)
+  // The muted badge is drawn from these — a missing badge must mean "not scored".
+  assertEquals(body.results[0].match_score, 42)
+  assertEquals(body.results[0].match_reasons, ["weak"])
+  assertEquals(insertedRows.length, 0)
+  restore()
+})
+
+Deno.test("batch with reordered scores: each score lands on the right profile by index, not position", async () => {
+  const restore = stubBatchBackend({
+    minScore: 50,
+    // Model returns the two scores in reverse order.
+    scores: [
+      { index: 1, match_score: 90, match_reasons: ["strong"], country: null },
+      { index: 0, match_score: 30, match_reasons: ["weak"], country: null },
+    ],
+  })
+  const res = await handler(makeReq({
+    device_token: "t",
+    profiles: [P("A", "https://li/a"), P("B", "https://li/b")],
+  }))
+  const body = await res.json()
+
+  // If matched by position, A would wrongly get 90. Matched by index, A gets 30.
+  assertEquals(body.results[0].linkedin_url, "https://li/a")
+  assertEquals(body.results[0].match_score, 30)
+  assertEquals(body.results[1].linkedin_url, "https://li/b")
+  assertEquals(body.results[1].match_score, 90)
+  restore()
+})
+
+Deno.test("batch with a missing index: that profile is absent from results, the others unaffected", async () => {
+  const restore = stubBatchBackend({
+    minScore: 70,
+    // Only profile 0 is scored; profile 1's index is omitted entirely.
+    scores: [{ index: 0, match_score: 80, match_reasons: ["ok"], country: null }],
+  })
+  const res = await handler(makeReq({
+    device_token: "t",
+    profiles: [P("A", "https://li/a"), P("B", "https://li/b")],
+  }))
+  const body = await res.json()
+
+  // The omitted profile drops out; the scored one is unaffected and inserted.
+  assertEquals(body.results.length, 1)
+  assertEquals(body.results[0].linkedin_url, "https://li/a")
+  assertEquals(body.results[0].inserted, true)
+  assertEquals(insertedRows.length, 1)
+  restore()
+})
+
+Deno.test("batch folder_id the caller does not own is rejected, nothing inserted", async () => {
+  const restore = stubBatchBackend({
+    minScore: 70,
+    folder: null,
+    scores: [{ index: 0, match_score: 90, match_reasons: ["ok"], country: null }],
+  })
+  const res = await handler(makeReq({
+    device_token: "t",
+    folder_id: "someone-elses",
+    profiles: [P("A", "https://li/a")],
+  }))
+  const body = await res.json()
+
+  assertEquals(res.status, 400)
+  assertEquals(body.error, "invalid_folder")
+  assertEquals(insertedRows.length, 0)
+  // Rejected before the LLM was ever called.
+  assertEquals(llmCallCount, 0)
+  restore()
+})
+
+Deno.test("batch dedupe hit is not relocated into the run's folder", async () => {
+  const restore = stubBatchBackend({
+    minScore: 70,
+    folder: { id: "f1", user_id: "u1" },
+    existingLeads: [
+      { id: "l1", linkedin_url: "https://li/a", match_score: 90, match_reasons: ["r"] },
+    ],
+    scores: [],
+  })
+  const res = await handler(makeReq({
+    device_token: "t",
+    folder_id: "f1",
+    profiles: [P("A", "https://li/a")],
+  }))
+  const body = await res.json()
+
+  assertEquals(body.results.length, 1)
+  assertEquals(body.results[0].stored, true)
+  assertEquals(body.results[0].inserted, false)
+  // Nothing written, so the existing lead keeps whatever folder it already had.
+  assertEquals(insertedRows.length, 0)
+  restore()
+})
+
+Deno.test("batch over MAX_BATCH is rejected with batch_too_large", async () => {
+  const restore = stubBatchBackend({ minScore: 70 })
+  const profiles = Array.from({ length: 21 }, (_, i) => P(`p${i}`, `https://li/${i}`))
+  const res = await handler(makeReq({ device_token: "t", profiles }))
+  const body = await res.json()
+
+  assertEquals(res.status, 400)
+  assertEquals(body.error, "batch_too_large")
+  assertEquals(llmCallCount, 0)
+  restore()
+})
+
+Deno.test("empty profiles array is rejected with missing_fields", async () => {
+  const restore = stubBatchBackend({ minScore: 70 })
+  const res = await handler(makeReq({ device_token: "t", profiles: [] }))
+  const body = await res.json()
+
+  assertEquals(res.status, 400)
+  assertEquals(body.error, "missing_fields")
+  restore()
+})
