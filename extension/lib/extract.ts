@@ -93,13 +93,19 @@ function isStructuralSearchResultCard(node: Element): boolean {
 /**
  * Finds all people-search result cards under `root`.
  *
- * Fast path: LinkedIn's known (but rotting) class names / data attributes.
- * If those match anything, use them as-is. Only when they yield nothing do
- * we fall back to structural discovery (see module comment above), so a
- * correct guess is never second-guessed and a stale one never blocks leads.
+ * Fast path: LinkedIn's known (but rotting) class names / data attributes,
+ * kept only when a hit actually looks like one person's card. Otherwise fall
+ * through to structural discovery.
  */
 export function findSearchResultCards(root: ParentNode): Element[] {
-  const fast = Array.from(root.querySelectorAll(KNOWN_SEARCH_RESULT_SELECTORS))
+  // Trusting the fast path merely because it matched *something* is a trap: a
+  // rotted selector can still hit a wrapper or an ad container holding no
+  // profile link at all. Those give cards.length > 0 but extract to null for
+  // every one, which reads as "found cards, couldn't score them" instead of
+  // the truth, "these selectors are stale". Require exactly one profile.
+  const fast = Array.from(
+    root.querySelectorAll(KNOWN_SEARCH_RESULT_SELECTORS)
+  ).filter((el) => profilePathsWithin(el).size === 1)
   if (fast.length > 0) return fast
 
   const anchors = Array.from(

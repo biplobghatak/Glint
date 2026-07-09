@@ -27,10 +27,22 @@ function hasCommercialLimitBanner(): boolean {
   return /commercial use limit/i.test(document.body.innerText)
 }
 
+// LinkedIn renders pagination in a footer below the whole results list, and
+// only mounts it once that region has been reached. Looking for the button
+// from the top of the page finds nothing, so bring the bottom into view first
+// and give the page a beat to mount it.
+async function scrollToPagination(): Promise<void> {
+  window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" })
+  await randomDelay(700, 1400)
+}
+
 function clickNextPage(): boolean {
   for (const selector of NEXT_PAGE_SELECTORS) {
     const next = document.querySelector<HTMLButtonElement>(selector)
     if (next) {
+      // A button scrolled out of view can still be clicked, but centering it
+      // matches what a person would do and avoids overlay intercepts.
+      next.scrollIntoView({ block: "center" })
       next.click()
       return true
     }
@@ -164,8 +176,8 @@ async function runAgentLoop(myTabId: number) {
     }
 
     const cards = findSearchResultCards(document)
-    if (cards.length > 0) everFoundCard = true
     let scoredThisBatch = 0
+    let extractedThisBatch = 0
 
     for (const node of cards) {
       // Re-check stop conditions fresh before every card, not just once per
@@ -187,6 +199,8 @@ async function runAgentLoop(myTabId: number) {
 
       const cand = extractFromNode(node)
       if (!cand) continue
+      extractedThisBatch++
+      everFoundCard = true
       const key = cand.linkedin_url ?? `${cand.name ?? ""}|${cand.company ?? ""}`
       if (seen.has(key)) continue
       seen.add(key)
@@ -216,6 +230,27 @@ async function runAgentLoop(myTabId: number) {
         }
       }
       await randomDelay(400, 900)
+    }
+
+    // Containers were discovered but every one of them extracted to null.
+    // That means discovery is matching the wrong elements (a wrapper, an ad
+    // slot) rather than person cards. Dump one so the markup can be read from
+    // the page console instead of guessed at.
+    if (cards.length > 0 && extractedThisBatch === 0 && !warnedAboutNoCards) {
+      warnedAboutNoCards = true
+      const sample = cards[0] as HTMLElement
+      console.warn(
+        "Glint: findSearchResultCards() matched",
+        cards.length,
+        "element(s) but extractFromNode() returned null for all of them.",
+        "\nFirst match tag/class:",
+        sample.tagName,
+        sample.className,
+        "\nProfile links inside it:",
+        sample.querySelectorAll('a[href*="/in/"]').length,
+        "\nOuter HTML (truncated):",
+        sample.outerHTML.slice(0, 800)
+      )
     }
 
     if (scoredThisBatch === 0) {
@@ -249,13 +284,27 @@ async function runAgentLoop(myTabId: number) {
       staleRounds = 0
     }
 
+    // Reach the footer before looking for the pager — it isn't in the DOM
+    // until the bottom of the results list has been scrolled into view.
+    await scrollToPagination()
+
     if (clickNextPage()) {
       paginationSucceededOnce = true
     } else {
       if (!warnedAboutNextSelector) {
         warnedAboutNextSelector = true
+        const buttons = Array.from(document.querySelectorAll("button"))
+          .filter((b) =>
+            /next|page/i.test((b.getAttribute("aria-label") ?? "") + b.textContent)
+          )
+          .map((b) => ({
+            aria: b.getAttribute("aria-label"),
+            cls: b.className,
+            txt: b.textContent?.trim().slice(0, 24),
+          }))
         console.warn(
-          `Glint: none of NEXT_PAGE_SELECTORS (${NEXT_PAGE_SELECTORS.map((s) => `'${s}'`).join(", ")}) matched a "Next" button — falling back to scroll. LinkedIn's markup may have changed.`
+          `Glint: none of NEXT_PAGE_SELECTORS (${NEXT_PAGE_SELECTORS.map((s) => `'${s}'`).join(", ")}) matched a "Next" button — falling back to scroll. Buttons on this page that look page-related:`,
+          buttons
         )
       }
       window.scrollBy(0, window.innerHeight * 0.8)
