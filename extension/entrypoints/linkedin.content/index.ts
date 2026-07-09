@@ -2,9 +2,9 @@ import { browser } from "wxt/browser"
 import type { ContentScriptContext } from "wxt/utils/content-script-context"
 import { createShadowRootUi } from "wxt/utils/content-script-ui/shadow-root"
 import { extractFromNode, findSearchResultCards, type LeadCandidate } from "@/lib/extract"
-import { scoreLead } from "@/lib/score"
+import { scoreLead, InvalidFolderError } from "@/lib/score"
 import { getRunState, setRunState, clearRunState, type RunState } from "@/lib/run"
-import type { RuntimeMessage, WhichTabMessage, WhichTabResponse } from "@/lib/messages"
+import { sendRuntimeMessage, type RuntimeMessage, type WhichTabMessage, type WhichTabResponse } from "@/lib/messages"
 import { consumeDraft } from "@/lib/draft"
 import { buildSearchUrl } from "@/lib/query"
 import { nextAction } from "@/lib/agent-step"
@@ -102,7 +102,7 @@ function injectBadge(
 }
 
 function sendMessage(message: RuntimeMessage) {
-  chrome.runtime.sendMessage(message).catch(() => {})
+  sendRuntimeMessage(message)
 }
 
 // Ask the background which tab this content script instance is running in,
@@ -222,7 +222,17 @@ async function runPageStep(myTabId: number, hud: HudHandle) {
     await settle()
     hud.update({ status: `Scoring ${cand.name ?? "a lead"}…` })
 
-    const result = await scoreLead(cand, initial.folderId)
+    let result: Awaited<ReturnType<typeof scoreLead>>
+    try {
+      result = await scoreLead(cand, initial.folderId)
+    } catch (err) {
+      node.classList.remove(SCANNING_CLASS)
+      if (err instanceof InvalidFolderError) {
+        await stopRun("That folder was deleted. Pick another and start again.")
+        return
+      }
+      throw err
+    }
 
     node.classList.remove(SCANNING_CLASS)
 

@@ -1,7 +1,7 @@
 import { isLinkedIn } from "@/lib/linkedin"
 import { parseQuery, buildSearchUrl, UnpairedError, NoIcpError, QueryServiceError, NetworkError } from "@/lib/query"
 import { getRunState, setRunState, clearRunState } from "@/lib/run"
-import type { RuntimeMessage, WhichTabResponse } from "@/lib/messages"
+import { sendRuntimeMessage, type RuntimeMessage, type WhichTabResponse } from "@/lib/messages"
 
 const DEFAULT_MAX_LEADS = 100
 const DEFAULT_MAX_MINUTES = 20
@@ -29,7 +29,7 @@ async function syncPanelForTab(tabId: number, url: string | undefined) {
 }
 
 function sendMessage(message: RuntimeMessage) {
-  chrome.runtime.sendMessage(message).catch(() => {})
+  sendRuntimeMessage(message)
 }
 
 // The side panel shows live progress while it's open, but the user can close it

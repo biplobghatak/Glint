@@ -8,7 +8,7 @@ import {
 } from "react"
 import { getDeviceToken } from "@/lib/pairing"
 import { getRunState } from "@/lib/run"
-import type { RuntimeMessage } from "@/lib/messages"
+import { sendRuntimeMessage, type RuntimeMessage } from "@/lib/messages"
 import { EMPTY_FILTER, type LeadFilter } from "@/lib/filter"
 import {
   listLeads,
@@ -30,6 +30,9 @@ import { DEFAULT_MAX_PAGES } from "@/lib/agent-step"
 import { FilterBar } from "@/components/filter-bar"
 import { LeadList } from "@/components/lead-list"
 import { SuggestionStrip } from "@/components/suggestion-strip"
+import { FolderPicker } from "@/components/folder-picker"
+
+type Screen = "folder" | "query"
 
 const SEARCH_DEBOUNCE_MS = 250
 const THRESHOLD_DEBOUNCE_MS = 400
@@ -56,6 +59,10 @@ function countryChips(targetCountries: string[], leads: Lead[]): string[] {
 
 export default function App() {
   const [paired, setPaired] = useState<boolean | null>(null)
+  const [screen, setScreen] = useState<Screen>("folder")
+  // The run's destination. `null` = Unfiled. Distinct from `filter.folderId`,
+  // whose `null` means "all folders" — never assign one to the other.
+  const [destination, setDestination] = useState<string | null>(null)
   const [query, setQuery] = useState("")
   const [maxPages, setMaxPages] = useState(DEFAULT_MAX_PAGES)
   const [running, setRunning] = useState(false)
@@ -156,6 +163,10 @@ export default function App() {
         // the user the run is younger than it is, right up until the cap fires.
         setStartedAt(run.startedAt)
         setMaxMinutes(run.maxMinutes)
+        // An in-flight run has already chosen its destination; skip the picker
+        // straight to the query screen, which shows the Stop button.
+        setDestination(run.folderId)
+        setScreen("query")
       }
       setPaired(token !== null)
     })
@@ -467,11 +478,11 @@ export default function App() {
     // rehydrates the real value on its next mount.
     setStartedAt(Date.now())
     setNow(Date.now())
-    chrome.runtime.sendMessage({ type: "START_RUN", query: trimmed, maxPages })
+    sendRuntimeMessage({ type: "START_RUN", query: trimmed, maxPages, folderId: destination })
   }
 
   function handleStop() {
-    chrome.runtime.sendMessage({ type: "STOP_RUN" })
+    sendRuntimeMessage({ type: "STOP_RUN" })
     setRunning(false)
     setStartedAt(null)
   }
@@ -486,6 +497,15 @@ export default function App() {
     filter.countries.length > 0 ||
     filter.status.length > 0 ||
     filter.folderId !== null
+
+  // The `?? "Unfiled"` matters: the selected folder can be deleted in the web
+  // app while the panel sits on the query screen, and a label reading
+  // `undefined` is worse than one that is merely stale. The authoritative check
+  // is server-side (score-lead's `invalid_folder`).
+  const destinationLabel =
+    destination === null
+      ? "Unfiled"
+      : (folders.find((f) => f.id === destination)?.name ?? "Unfiled")
 
   if (paired === null) {
     return (
@@ -542,7 +562,32 @@ export default function App() {
         </div>
       ) : (
         <>
+          {/* WHERE before WHO: a run chooses its destination before its query.
+              The picker replaces only the query form — the suggestion strip,
+              filters, and lead list below stay put. `running` forces the query
+              screen: a run in progress must show its Stop button, never the
+              picker. */}
+          {screen === "folder" && !running ? (
+            <FolderPicker
+              folders={folders}
+              selected={destination}
+              onSelect={setDestination}
+              onContinue={() => setScreen("query")}
+              onCreateFolder={handleCreateFolder}
+              creating={creatingFolder}
+              createError={createFolderError}
+            />
+          ) : (
           <form onSubmit={handleStart} className="flex flex-col gap-2">
+            {!running && (
+              <button
+                type="button"
+                onClick={() => setScreen("folder")}
+                className="text-muted-foreground hover:text-foreground self-start text-xs"
+              >
+                ‹ {destinationLabel}
+              </button>
+            )}
             <label className="text-sm font-medium">Who are you looking for?</label>
             <textarea
               ref={queryRef}
@@ -593,6 +638,7 @@ export default function App() {
               </button>
             )}
           </form>
+          )}
 
           {error && <p className="text-destructive text-sm">{error}</p>}
 

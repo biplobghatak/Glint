@@ -37,3 +37,19 @@ export type RuntimeMessage =
 // out of the RuntimeMessage union since it's never itself dispatched through
 // onMessage as an incoming message.
 export type WhichTabResponse = { tabId: number | null }
+
+/**
+ * Typed wrapper over chrome.runtime.sendMessage.
+ *
+ * chrome.runtime.sendMessage is declared `sendMessage<M = any>(message: M, …)`,
+ * so M is inferred from the argument and never checked against RuntimeMessage.
+ * Adding a required field to a message type therefore does NOT fail the build at
+ * the senders — it fails silently at runtime. Every send must go through here.
+ *
+ * The rejection is swallowed on purpose: sending to a closed side panel or a
+ * torn-down content script rejects with "Could not establish connection", which
+ * is normal, not an error.
+ */
+export function sendRuntimeMessage(message: RuntimeMessage): void {
+  chrome.runtime.sendMessage(message).catch(() => {})
+}

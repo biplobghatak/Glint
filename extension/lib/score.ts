@@ -3,6 +3,9 @@ import type { LeadCandidate } from "@/lib/extract"
 
 const env = import.meta.env as unknown as Record<string, string>
 
+/** The run's destination folder no longer exists. The run cannot continue. */
+export class InvalidFolderError extends Error {}
+
 // min_score rides along on the score response so the content script can decide
 // whether a badge is muted without a second round-trip per card. It is the
 // user's icps.min_score, not a property of this lead.
@@ -54,9 +57,17 @@ export async function scoreLead(
         folder_id: folderId,
       }),
     })
+    if (res.status === 400) {
+      const detail = (await res.json().catch(() => null)) as { error?: string } | null
+      if (detail?.error === "invalid_folder") throw new InvalidFolderError("invalid_folder")
+    }
     if (!res.ok) return null
     return (await res.json()) as ScoreResult
-  } catch {
+  } catch (err) {
+    // A deleted destination folder must stop the run, not read as a scoring
+    // miss. Let it propagate; every other failure (network, parse) degrades to
+    // a skipped card as before.
+    if (err instanceof InvalidFolderError) throw err
     return null
   }
 }
