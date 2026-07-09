@@ -93,6 +93,11 @@ Deno.serve(async (req: Request) => {
     .select("id, name, company, role, linkedin_url, match_score, match_reasons")
     .eq("user_id", user_id)
     .eq("status", "new")
+    // Untriaged, in both senses: not yet contacted, and not yet filed. Filing a
+    // lead into a folder is the user acting on it, so it stops being something
+    // Glint should keep suggesting. Without this the strip would re-offer a lead
+    // the user just organized, and the refresh after an assign would be a no-op.
+    .is("folder_id", null)
     .gte("match_score", minScore)
     // Both actions on a suggestion card are "open this URL". A row without one
     // is a dead card, so it is dropped here rather than rendered and disabled.

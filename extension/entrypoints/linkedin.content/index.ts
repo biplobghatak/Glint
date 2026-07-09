@@ -1,8 +1,12 @@
 import { browser } from "wxt/browser"
+import type { ContentScriptContext } from "wxt/utils/content-script-context"
+import { createShadowRootUi } from "wxt/utils/content-script-ui/shadow-root"
 import { extractFromNode, findSearchResultCards, type LeadCandidate } from "@/lib/extract"
 import { scoreLead } from "@/lib/score"
 import { getRunState, setRunState, clearRunState, type RunState } from "@/lib/run"
 import type { RuntimeMessage, WhichTabMessage, WhichTabResponse } from "@/lib/messages"
+import { consumeDraft } from "@/lib/draft"
+import { renderDraftCard } from "./draft-card"
 import "./style.css"
 
 const FEED_POST_SELECTOR = 'div.feed-shared-update-v2, [data-urn*="urn:li:activity"]'
@@ -356,12 +360,42 @@ async function runAgentLoop(myTabId: number) {
   }
 }
 
+// Mounts the draft-opener card, if the panel left a draft for THIS profile.
+//
+// The panel wrote it to chrome.storage.local and then opened this tab, so this
+// is the far side of that handoff. consumeDraft() is single-use and TTL-bounded:
+// a draft for a tab the user closed before it loaded must not ambush them on the
+// next profile they open.
+async function mountDraftCard(ctx: ContentScriptContext): Promise<void> {
+  if (!location.pathname.startsWith("/in/")) return
+
+  const draft = await consumeDraft(location.pathname)
+  if (!draft) return
+
+  const ui = await createShadowRootUi<() => void>(ctx, {
+    name: DRAFT_CARD_TAG,
+    position: "overlay",
+    anchor: "body",
+    onMount: (container) => renderDraftCard(container, draft, () => ui.remove()),
+    // renderDraftCard returns its own teardown (it polls for LinkedIn's
+    // composer); dropping it here would leak an interval per dismissed card.
+    onRemove: (teardown) => teardown?.(),
+  })
+  ui.mount()
+}
+
 export default defineContentScript({
   matches: ["*://*.linkedin.com/*"],
   // Required by createShadowRootUi: hands style.css to the draft card's shadow
   // root instead of injecting it into LinkedIn's document.
   cssInjectionMode: "ui",
   main(ctx) {
+    // Independent of the scan/agent machinery below: a profile page has no
+    // result cards, and a search page has no pending draft.
+    mountDraftCard(ctx).catch((err) =>
+      console.debug("Glint: mountDraftCard failed", err)
+    )
+
     // An unpacked extension never auto-updates — Chrome keeps running whatever
     // was loaded last. Print the build stamp so a stale extension announces
     // itself instead of masquerading as a code bug.
