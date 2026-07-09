@@ -13,15 +13,18 @@ const DEFAULT_MAX_MINUTES = 20
 class NavigationError extends Error {}
 
 async function syncPanelForTab(tabId: number, url: string | undefined) {
+  const enabled = isLinkedIn(url)
   try {
-    await chrome.sidePanel.setOptions({
-      tabId,
-      path: "sidepanel.html",
-      enabled: isLinkedIn(url),
-    })
+    // Pass `path` only when enabling. Chrome's own site-specific side-panel
+    // example omits it on the disable call, and sending both can reject —
+    // which the catch below would swallow, leaving the panel enabled and
+    // following the user onto every site.
+    await chrome.sidePanel.setOptions(
+      enabled ? { tabId, path: "sidepanel.html", enabled: true } : { tabId, enabled: false }
+    )
   } catch (err) {
     // tab may have closed mid-update; ignore, but keep it visible
-    console.debug("Glint: syncPanelForTab failed", tabId, err)
+    console.debug("Glint: syncPanelForTab failed", tabId, enabled, err)
   }
 }
 
