@@ -67,7 +67,7 @@ export function AuthForm({ mode }: { mode: Mode }) {
         Glint<span className="text-primary">.</span>
       </Link>
 
-      <div className="w-full max-w-sm border border-border bg-card p-8 shadow-sm">
+      <div className="w-full max-w-sm rounded-lg border border-border bg-card p-8 shadow-sm">
         {status === "sent" ? (
           <div className="flex flex-col gap-2 text-center">
             <h1 className="text-lg font-semibold tracking-wide uppercase">

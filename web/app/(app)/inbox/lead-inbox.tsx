@@ -459,19 +459,19 @@ export function LeadInbox({
       </PageHeader>
 
       <div className="flex flex-1 items-start">
-        <aside className="border-sidebar-border bg-sidebar hidden w-60 shrink-0 self-stretch border-r p-4 md:block">
+        <aside className="border-sidebar-border bg-sidebar sticky top-0 hidden max-h-svh w-60 shrink-0 self-start overflow-y-auto border-r p-4 md:block">
           {rail}
         </aside>
 
         <div className="flex min-w-0 flex-1 flex-col gap-4 p-4">
-          <div className="border-border flex w-fit border">
+          <div className="border-border bg-muted/40 flex w-fit gap-1 rounded-md border p-1">
             {SCORE_FILTERS.map((f) => (
               <button
                 key={f.key}
                 type="button"
                 onClick={() => setFilter(f.key)}
                 className={cn(
-                  "px-3 py-1.5 text-sm font-medium transition-colors",
+                  "rounded-sm px-3 py-1.5 text-sm font-medium transition-colors",
                   filter === f.key
                     ? "bg-primary text-primary-foreground"
                     : "text-muted-foreground hover:text-foreground"

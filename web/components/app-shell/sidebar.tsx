@@ -32,14 +32,16 @@ function SidebarNav({ onNavigate }: { onNavigate?: () => void }) {
   return (
     <nav className="flex flex-col gap-1">
       {NAV_LINKS.map(({ href, label, icon: Icon }) => {
-        const active = pathname === href
+        // Settings redirects to /settings/icp, so an exact match would never
+        // light up the nav item the user is actually looking at.
+        const active = pathname === href || pathname.startsWith(`${href}/`)
         return (
           <Link
             key={href}
             href={href}
             onClick={onNavigate}
             className={cn(
-              "flex items-center gap-2.5 border border-transparent px-3 py-2 text-sm font-medium transition-colors",
+              "flex items-center gap-2.5 rounded-md border border-transparent px-3 py-2 text-sm font-medium transition-colors",
               active
                 ? "border-border bg-sidebar-accent text-sidebar-accent-foreground"
                 : "text-sidebar-foreground/70 hover:bg-sidebar-accent/50 hover:text-sidebar-accent-foreground"
@@ -56,11 +58,13 @@ function SidebarNav({ onNavigate }: { onNavigate?: () => void }) {
 
 function Sidebar() {
   return (
-    <aside className="hidden w-56 shrink-0 flex-col gap-6 border-r border-sidebar-border bg-sidebar p-4 md:flex">
-      <Link href="/dashboard" className="text-lg font-bold tracking-tight">
-        Glint<span className="text-primary">.</span>
-      </Link>
-      <SidebarNav />
+    <aside className="hidden h-full shrink-0 p-3 md:block">
+      <div className="flex h-full w-56 flex-col gap-6 overflow-y-auto rounded-2xl border border-sidebar-border bg-sidebar p-4">
+        <Link href="/dashboard" className="text-lg font-bold tracking-tight">
+          Glint<span className="text-primary">.</span>
+        </Link>
+        <SidebarNav />
+      </div>
     </aside>
   )
 }
