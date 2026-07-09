@@ -1,4 +1,4 @@
-import { isLinkedIn } from "@/lib/linkedin"
+import { isLinkedIn, isPreNavigation } from "@/lib/linkedin"
 import { parseQuery, buildSearchUrl, UnpairedError, NoIcpError, QueryServiceError, NetworkError } from "@/lib/query"
 import { getRunState, setRunState, clearRunState, isRunning, type PauseReason, type RunState } from "@/lib/run"
 import { LINKEDIN_MAX_PAGE } from "@/lib/agent-step"
@@ -347,7 +347,13 @@ async function watchdogTick(): Promise<void> {
     return
   }
   const tab = await chrome.tabs.get(state.tabId).catch(() => null)
-  if (!tab || tab.discarded || !isLinkedIn(tab.url)) {
+  if (!tab) {
+    await pauseRun("tab_lost")
+    return
+  }
+  // A run window that hasn't reached its search URL yet is starting, not lost.
+  if (isPreNavigation(tab.url)) return
+  if (tab.discarded || !isLinkedIn(tab.url)) {
     await pauseRun("tab_lost")
     return
   }
@@ -391,6 +397,9 @@ async function reconcileRunState(navigatedTabId?: number): Promise<void> {
     await pauseRun("tab_lost")
     return
   }
+  // Still on about:blank — startRun has written the state but not yet applied the
+  // search URL. Starting is not the same as lost.
+  if (isPreNavigation(tab.url)) return
   // The tab is alive but has genuinely navigated off LinkedIn, so no content
   // script can be driving it. A LinkedIn URL — even mid-load, backgrounded, or
   // mid-SPA-navigation — is left alone; isLinkedIn() only ever returns false for

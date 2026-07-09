@@ -674,7 +674,20 @@ export default defineContentScript({
     let hudHandle: { hud: HudHandle; remove: () => void } | null = null
 
     async function ensureHud(): Promise<HudHandle> {
-      if (!hudHandle) hudHandle = await mountHud(ctx, () => sendMessage({ type: "STOP_RUN" }))
+      if (!hudHandle) {
+        hudHandle = await mountHud(ctx, () => sendMessage({ type: "STOP_RUN" }))
+        // Seed from state. Without this the HUD paints its own defaults —
+        // "page 1 of 1" — which is a lie on a 100-page run, and a particularly
+        // confusing one on a run that paused before ever scanning a page.
+        const state = latestRunState
+        if (state) {
+          hudHandle.hud.update({
+            leadCount: state.leadCount,
+            page: state.page,
+            maxPages: state.maxPages,
+          })
+        }
+      }
       return hudHandle.hud
     }
 
