@@ -152,12 +152,19 @@ Deno.serve(async (req: Request) => {
 
   const { data: icp } = await supabase
     .from("icps")
-    .select("min_score")
+    .select("min_score, target_countries")
     .eq("user_id", user_id)
     .maybeSingle()
 
   const has_icp = !!icp
   const min_score = icp?.min_score ?? DEFAULT_MIN_SCORE
+  // Seeds the panel's country chips. Postgres has no cheap DISTINCT through
+  // PostgREST, and scanning every lead's country to build the chip list would
+  // reintroduce the unbounded fetch this function exists to avoid. The ICP's
+  // target geography is the right seed set anyway: it's what the user said they
+  // sell into. The panel unions it with the countries actually present on the
+  // rows it has loaded.
+  const target_countries: string[] = icp?.target_countries ?? []
 
   const filter = body.filter ?? {}
   const q = sanitizeQuery(filter.q)
@@ -269,6 +276,7 @@ Deno.serve(async (req: Request) => {
       below_threshold_count: belowCount ?? 0,
       min_score,
       has_icp,
+      target_countries,
     }),
     { headers: jsonHeaders }
   )

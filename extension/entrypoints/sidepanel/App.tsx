@@ -1,11 +1,45 @@
-import { useEffect, useState, type FormEvent } from "react"
+import {
+  useCallback,
+  useDeferredValue,
+  useEffect,
+  useRef,
+  useState,
+  type FormEvent,
+} from "react"
 import { getDeviceToken } from "@/lib/pairing"
 import { getRunState } from "@/lib/run"
 import type { RuntimeMessage } from "@/lib/messages"
+import { EMPTY_FILTER, type LeadFilter } from "@/lib/filter"
+import {
+  listLeads,
+  updateMinScore,
+  type LeadCursor,
+  type LeadRow as Lead,
+} from "@/lib/leads"
+import { FilterBar } from "@/components/filter-bar"
+import { LeadList } from "@/components/lead-list"
+
+const SEARCH_DEBOUNCE_MS = 250
+const THRESHOLD_DEBOUNCE_MS = 400
+const DEFAULT_MIN_SCORE = 70
 
 function formatElapsed(startedAt: number, now: number): string {
   const totalSeconds = Math.max(0, Math.floor((now - startedAt) / 1000))
   return `${Math.floor(totalSeconds / 60)}:${String(totalSeconds % 60).padStart(2, "0")}`
+}
+
+function isAbort(err: unknown): boolean {
+  return err instanceof DOMException && err.name === "AbortError"
+}
+
+// Chips the user can pick from: the ICP's target geography, plus any country
+// actually present on the rows loaded so far. Unknown is prepended by FilterBar.
+function countryChips(targetCountries: string[], leads: Lead[]): string[] {
+  const set = new Set(targetCountries)
+  for (const lead of leads) {
+    if (lead.country) set.add(lead.country)
+  }
+  return Array.from(set).sort()
 }
 
 export default function App() {
@@ -20,6 +54,31 @@ export default function App() {
   const [startedAt, setStartedAt] = useState<number | null>(null)
   const [maxMinutes, setMaxMinutes] = useState(20)
   const [now, setNow] = useState(() => Date.now())
+
+  // --- lead list ---
+  const [filter, setFilter] = useState<LeadFilter>(EMPTY_FILTER)
+  const [searchInput, setSearchInput] = useState("")
+  const [leads, setLeads] = useState<Lead[]>([])
+  const [cursor, setCursor] = useState<LeadCursor | null>(null)
+  const [belowThresholdCount, setBelowThresholdCount] = useState(0)
+  const [targetCountries, setTargetCountries] = useState<string[]>([])
+  // The user's saved icps.min_score. Only ever changes after update-icp
+  // confirms the write, so the list is never refetched against a threshold the
+  // server hasn't stored yet.
+  const [savedMinScore, setSavedMinScore] = useState(DEFAULT_MIN_SCORE)
+  // What the slider shows: tracks the drag optimistically, ahead of the write.
+  const [sliderValue, setSliderValue] = useState(DEFAULT_MIN_SCORE)
+  const [hasIcp, setHasIcp] = useState<boolean | null>(null)
+  const [revealed, setRevealed] = useState(false)
+  const [listLoading, setListLoading] = useState(false)
+  const [loadingMore, setLoadingMore] = useState(false)
+  const [listError, setListError] = useState<string | null>(null)
+  // Bumped to force a refetch when nothing in `filter` changed — e.g. a run
+  // just ended and wrote new leads.
+  const [refreshKey, setRefreshKey] = useState(0)
+
+  const listAbortRef = useRef<AbortController | null>(null)
+  const thresholdTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
 
   useEffect(() => {
     if (!running || startedAt === null) return
@@ -59,6 +118,8 @@ export default function App() {
         setRunning(false)
         setStartedAt(null)
         setStatus(message.reason)
+        // The run just wrote leads the list can't know about.
+        setRefreshKey((k) => k + 1)
       } else if (message.type === "RUN_ERROR") {
         setRunning(false)
         setStartedAt(null)
@@ -68,6 +129,97 @@ export default function App() {
     chrome.runtime.onMessage.addListener(onMessage)
     return () => chrome.runtime.onMessage.removeListener(onMessage)
   }, [])
+
+  // Debounce the search box into the filter. Typing must not fire a request per
+  // keystroke, and every filter change resets pagination to the first page —
+  // carrying a cursor forward returns a page from the middle of the old result
+  // set.
+  useEffect(() => {
+    if (searchInput === filter.q) return
+    const id = setTimeout(
+      () => setFilter((f) => ({ ...f, q: searchInput })),
+      SEARCH_DEBOUNCE_MS
+    )
+    return () => clearTimeout(id)
+  }, [searchInput, filter.q])
+
+  // Fetch page one whenever the filter, the reveal toggle, or the saved
+  // threshold changes. An in-flight request for a stale filter is aborted, not
+  // awaited: without cancellation a fast typist gets responses out of order and
+  // the list flickers backward.
+  useEffect(() => {
+    if (paired !== true) return
+
+    listAbortRef.current?.abort()
+    const controller = new AbortController()
+    listAbortRef.current = controller
+
+    setListLoading(true)
+    setListError(null)
+
+    // revealed drops the threshold to 0 for this request only; it never writes
+    // icps.min_score.
+    const requestFilter: LeadFilter = revealed ? { ...filter, minScore: 0 } : filter
+
+    listLeads(requestFilter, null, controller.signal)
+      .then((res) => {
+        setLeads(res.leads)
+        setCursor(res.next_cursor)
+        setBelowThresholdCount(res.below_threshold_count)
+        setTargetCountries(res.target_countries)
+        setHasIcp(res.has_icp)
+        setSavedMinScore(res.min_score)
+        setSliderValue((v) => (v === res.min_score ? v : res.min_score))
+        setListLoading(false)
+      })
+      .catch((err: unknown) => {
+        // An aborted request was superseded by a newer one; the newer one owns
+        // the loading state.
+        if (isAbort(err)) return
+        setListError(err instanceof Error ? err.message : "Couldn't load leads")
+        setListLoading(false)
+      })
+
+    return () => controller.abort()
+    // savedMinScore participates because the server resolves a null
+    // filter.minScore against it.
+  }, [paired, filter, revealed, savedMinScore, refreshKey])
+
+  const handleLoadMore = useCallback(() => {
+    if (!cursor || loadingMore) return
+    setLoadingMore(true)
+    const requestFilter: LeadFilter = revealed ? { ...filter, minScore: 0 } : filter
+    // Its own controller: a "load more" must not be cancelled by, nor cancel,
+    // the page-one effect.
+    const controller = new AbortController()
+    listLeads(requestFilter, cursor, controller.signal)
+      .then((res) => {
+        setLeads((prev) => [...prev, ...res.leads])
+        setCursor(res.next_cursor)
+        setLoadingMore(false)
+      })
+      .catch((err: unknown) => {
+        if (isAbort(err)) return
+        setListError(err instanceof Error ? err.message : "Couldn't load more leads")
+        setLoadingMore(false)
+      })
+  }, [cursor, loadingMore, filter, revealed])
+
+  // Slider moves immediately; the write (and the refetch it triggers) is
+  // debounced, so dragging across 0-100 doesn't fire 20 updates.
+  const handleMinScoreChange = useCallback((value: number) => {
+    setSliderValue(value)
+    clearTimeout(thresholdTimerRef.current)
+    thresholdTimerRef.current = setTimeout(() => {
+      updateMinScore(value)
+        .then((persisted) => setSavedMinScore(persisted))
+        .catch((err: unknown) => {
+          setListError(err instanceof Error ? err.message : "Couldn't save threshold")
+        })
+    }, THRESHOLD_DEBOUNCE_MS)
+  }, [])
+
+  useEffect(() => () => clearTimeout(thresholdTimerRef.current), [])
 
   function handleStart(e: FormEvent) {
     e.preventDefault()
@@ -91,6 +243,12 @@ export default function App() {
     setStartedAt(null)
   }
 
+  // Keeps the previous rows painted while a new filter's results are in flight.
+  const visibleLeads = useDeferredValue(leads)
+  const chips = countryChips(targetCountries, visibleLeads)
+  const filtersActive =
+    filter.q.length > 0 || filter.countries.length > 0 || filter.status.length > 0
+
   if (paired === null) {
     return (
       <div className="bg-background text-foreground flex h-full items-center justify-center p-4 text-sm">
@@ -107,6 +265,7 @@ export default function App() {
           Find and score LinkedIn leads against your ICP
         </p>
       </header>
+
       {!paired ? (
         <>
           <p className="text-muted-foreground text-sm">
@@ -122,6 +281,17 @@ export default function App() {
             </button>
           )}
         </>
+      ) : hasIcp === false ? (
+        // Paired, but no ICP: scoring a lead requires one, so there is nothing
+        // to search for and nothing to list. Until list-leads existed the panel
+        // had no way to ask this question.
+        <div className="border-border bg-card flex flex-col gap-2 rounded-[var(--radius)] border p-3">
+          <p className="text-sm font-medium">Finish setting up your ICP</p>
+          <p className="text-muted-foreground text-xs">
+            Glint scores every lead against your ideal customer profile. Create one in
+            the web app, then come back here to start a run.
+          </p>
+        </div>
       ) : (
         <>
           <form onSubmit={handleStart} className="flex flex-col gap-2">
@@ -130,7 +300,7 @@ export default function App() {
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder="Find me CEOs of ecommerce startups"
-              className="border-border bg-card min-h-20 resize-none rounded-[var(--radius)] border px-3 py-1.5 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
+              className="border-border bg-card focus-visible:ring-ring min-h-20 resize-none rounded-[var(--radius)] border px-3 py-1.5 text-sm outline-none focus-visible:ring-2 disabled:opacity-50"
               required
               disabled={running}
             />
@@ -152,7 +322,9 @@ export default function App() {
               </button>
             )}
           </form>
+
           {error && <p className="text-destructive text-sm">{error}</p>}
+
           {(running || status) && (
             <div className="border-border bg-card flex flex-col gap-1 rounded-[var(--radius)] border p-3 text-sm">
               <div className="flex items-center justify-between">
@@ -180,9 +352,38 @@ export default function App() {
                   </span>
                 )}
               </div>
-              {status && <p className="text-muted-foreground border-border mt-1 border-t pt-1 text-xs">{status}</p>}
+              {status && (
+                <p className="text-muted-foreground border-border mt-1 border-t pt-1 text-xs">
+                  {status}
+                </p>
+              )}
             </div>
           )}
+
+          <FilterBar
+            filter={filter}
+            onChange={setFilter}
+            query={searchInput}
+            onQueryChange={setSearchInput}
+            countries={chips}
+            minScore={sliderValue}
+            onMinScoreChange={handleMinScoreChange}
+          />
+
+          <LeadList
+            leads={visibleLeads}
+            minScore={savedMinScore}
+            loading={listLoading}
+            error={listError}
+            belowThresholdCount={belowThresholdCount}
+            revealed={revealed}
+            onToggleReveal={() => setRevealed((r) => !r)}
+            hasMore={cursor !== null}
+            loadingMore={loadingMore}
+            onLoadMore={handleLoadMore}
+            filtersActive={filtersActive}
+          />
+
           <p className="text-muted-foreground border-border mt-auto border-t pt-2 text-xs">
             Glint scores what LinkedIn renders on the results list. It never opens
             profiles, and scores are estimates.
