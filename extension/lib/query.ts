@@ -52,7 +52,20 @@ export async function parseQuery(query: string): Promise<ParsedQuery> {
   if (res.status === 404) throw new NoIcpError("no_icp")
   if (!res.ok) throw new QueryServiceError(`parse-search-query failed (${res.status})`)
 
-  const body: unknown = await res.json()
+  // A 200 with a non-JSON body (crashed function, proxy error page) throws a
+  // SyntaxError here. Left unguarded it reaches the caller as an unclassified
+  // error and gets reported as a parse failure — the same misleading message
+  // the typed errors exist to avoid.
+  let body: unknown
+  try {
+    body = await res.json()
+  } catch (err) {
+    throw new QueryServiceError(
+      `parse-search-query returned a non-JSON body: ${
+        err instanceof Error ? err.message : String(err)
+      }`
+    )
+  }
   if (!isParsedQuery(body)) {
     throw new QueryServiceError(
       "parse-search-query returned a malformed response (expected {title, keywords, location} strings)"
