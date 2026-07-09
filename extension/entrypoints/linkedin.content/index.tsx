@@ -1,10 +1,19 @@
+import ReactDOM from "react-dom/client"
 import { browser } from "wxt/browser"
+import { createShadowRootUi } from "wxt/utils/content-script-ui/shadow-root"
 import { extractFromNode, findSearchResultCards, type LeadCandidate } from "@/lib/extract"
 import { scoreLead } from "@/lib/score"
 import { getRunState, setRunState, clearRunState, type RunState } from "@/lib/run"
 import type { RuntimeMessage, WhichTabMessage, WhichTabResponse } from "@/lib/messages"
+import { RunOverlay } from "./run-overlay"
+import "./style.css"
 
 const FEED_POST_SELECTOR = 'div.feed-shared-update-v2, [data-urn*="urn:li:activity"]'
+
+// The custom element createShadowRootUi() mounts the run overlay into. Named
+// here rather than inlined because the MutationObserver guard has to recognize
+// it — see isGlintNode().
+const OVERLAY_TAG = "glint-run-overlay"
 
 // UNVERIFIED against live LinkedIn markup — best-effort guesses, tried in
 // order. The first one that matches a non-disabled button wins. If none of
@@ -25,6 +34,20 @@ function randomDelay(minMs: number, maxMs: number): Promise<void> {
 
 function hasCommercialLimitBanner(): boolean {
   return /commercial use limit/i.test(document.body.innerText)
+}
+
+// Everything Glint injects into LinkedIn's document: score badges, and the
+// run overlay's shadow host. The MutationObserver watches document.body with
+// subtree:true, so every one of these injections re-triggers it — and the
+// scan it schedules injects more badges. Without this guard that is a
+// feedback loop, not a scan.
+function isGlintNode(node: Node): boolean {
+  if (!(node instanceof Element)) return false
+  return (
+    node.tagName.toLowerCase() === OVERLAY_TAG ||
+    node.classList.contains("glint-badge") ||
+    node.closest(`${OVERLAY_TAG}, .glint-badge`) !== null
+  )
 }
 
 // LinkedIn renders pagination in a footer below the whole results list, and
@@ -98,12 +121,10 @@ async function requestMyTabId(): Promise<number | null> {
     } satisfies WhichTabMessage)) as WhichTabResponse | undefined
     return response?.tabId ?? null
   } catch {
-    // On Firefox, background.ts registers no listeners at all (everything
-    // is gated behind `BROWSER === "chrome"`), so this request has no
-    // receiving end and the promise rejects ("Could not establish
-    // connection"). Treat that as "this is not the run's tab" — runs can
-    // never start on Firefox anyway (the side panel is Chrome-only), so
-    // falling back to passive mode is correct, not a degraded state.
+    // The background listener is registered on every target now that the
+    // Chrome-only side panel is gone, so this should not normally reject.
+    // Treat a failure as "this is not the run's tab": falling back to passive
+    // mode badges the page correctly and never drives a run it doesn't own.
     return null
   }
 }
@@ -316,7 +337,10 @@ async function runAgentLoop(myTabId: number) {
 
 export default defineContentScript({
   matches: ["*://*.linkedin.com/*"],
-  main() {
+  // Required by createShadowRootUi: keeps style.css out of LinkedIn's document
+  // and hands it to the overlay's shadow root instead.
+  cssInjectionMode: "ui",
+  main(ctx) {
     // An unpacked extension never auto-updates — Chrome keeps running whatever
     // was loaded last. Print the build stamp so a stale extension announces
     // itself instead of masquerading as a code bug.
@@ -328,7 +352,7 @@ export default defineContentScript({
     // moment it's launched until its promise settles. Used to stop the
     // browser.storage.onChanged listener from re-arming passive mode while
     // the agent loop is still unwinding (e.g. mid scoreLead()) after Stop —
-    // otherwise both modes can briefly score the same cards. See Fix 3.
+    // otherwise both modes can briefly score the same cards.
     let loopRunning = false
 
     // agentActive must mean "an agent loop is driving THIS tab", not "some
@@ -337,12 +361,12 @@ export default defineContentScript({
     // duration. That requires knowing this tab's own id, which is resolved
     // asynchronously (requestMyTabId(), below) — but browser.storage.onChanged
     // is registered before that resolves. myTabId/tabIdResolved distinguish
-    // "not yet known" (tabIdResolved: false) from "known and null" (Firefox,
-    // or a WHICH_TAB request that failed) — collapsing those would either
-    // wrongly gate a real run's own tab off, or wrongly treat an unresolved
-    // tab id as a match. While unresolved, agentActive is forced false (never
-    // "not my run" mis-set as true) and re-evaluated the instant myTabId
-    // resolves, using whichever run state is freshest at that point.
+    // "not yet known" (tabIdResolved: false) from "known and null" (a
+    // WHICH_TAB request that failed) — collapsing those would either wrongly
+    // gate a real run's own tab off, or wrongly treat an unresolved tab id as
+    // a match. While unresolved, agentActive is forced false (never "not my
+    // run" mis-set as true) and re-evaluated the instant myTabId resolves,
+    // using whichever run state is freshest at that point.
     let myTabId: number | null = null
     let tabIdResolved = false
     // Tracks the latest glint_run value observed via storage.onChanged, so
@@ -354,6 +378,51 @@ export default defineContentScript({
     // marks whether a change was observed at all.
     let sawStorageChange = false
     let latestRunState: RunState | undefined
+
+    // --- run overlay (replaces the side panel's live progress) ---
+    type OverlayUi = Awaited<ReturnType<typeof createShadowRootUi>>
+    let overlayUi: OverlayUi | null = null
+    // createShadowRootUi is async, so a run can end while the overlay is still
+    // being constructed. Without this, two rapid start/stop cycles can mount an
+    // overlay for a run that has already finished, with nothing left to unmount it.
+    let overlayPending = false
+
+    async function mountOverlay(state: RunState) {
+      if (overlayUi || overlayPending) return
+      overlayPending = true
+      try {
+        const ui = await createShadowRootUi(ctx, {
+          name: OVERLAY_TAG,
+          position: "overlay",
+          anchor: "body",
+          onMount: (container) => {
+            const root = ReactDOM.createRoot(container)
+            root.render(<RunOverlay initial={state} />)
+            return root
+          },
+          onRemove: (root) => root?.unmount(),
+        })
+        // Re-check: the run may have ended during the await above.
+        if (!agentActive) return
+        ui.mount()
+        overlayUi = ui
+      } finally {
+        overlayPending = false
+      }
+    }
+
+    function unmountOverlay() {
+      overlayUi?.remove()
+      overlayUi = null
+    }
+
+    function syncOverlay(state: RunState | undefined | null) {
+      if (agentActive && state) {
+        mountOverlay(state)
+      } else {
+        unmountOverlay()
+      }
+    }
 
     // --- existing passive scan (unchanged behavior, gated off during a run) ---
     const seen = new Set<string>()
@@ -394,7 +463,17 @@ export default defineContentScript({
     }
 
     let debounce: ReturnType<typeof setTimeout> | undefined
-    const observer = new MutationObserver(() => {
+    const observer = new MutationObserver((mutations) => {
+      // Ignore mutations we caused ourselves. Badging a card is a childList
+      // mutation on that card; mounting the overlay is one on <body>. Either
+      // would schedule a scan, which badges more cards, which schedules
+      // another scan. Removals are never ours, so they always count.
+      const meaningful = mutations.some((m) => {
+        if (isGlintNode(m.target)) return false
+        if (m.addedNodes.length === 0) return true
+        return !Array.from(m.addedNodes).every(isGlintNode)
+      })
+      if (!meaningful) return
       clearTimeout(debounce)
       debounce = setTimeout(() => scan(document), 500)
     })
@@ -437,6 +516,7 @@ export default defineContentScript({
       sawStorageChange = true
       latestRunState = newState
       agentActive = computeAgentActive(newState)
+      syncOverlay(newState)
       // Don't re-arm passive mode here if this tab's own agent loop is still
       // unwinding (e.g. finishing a scoreLead() call after Stop cleared
       // glint_run). runAgentLoop()'s .finally() below is the one that calls
@@ -464,10 +544,12 @@ export default defineContentScript({
       // off, which could already be stale by the time we get here.
       const effectiveState = sawStorageChange ? latestRunState : (state ?? undefined)
       agentActive = computeAgentActive(effectiveState)
+      syncOverlay(effectiveState)
       if (agentActive && myTabId !== null) {
         loopRunning = true
         runAgentLoop(myTabId).finally(() => {
           loopRunning = false
+          unmountOverlay()
           startPassive()
         })
       } else {
