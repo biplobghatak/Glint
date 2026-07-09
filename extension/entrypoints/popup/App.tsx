@@ -1,18 +1,34 @@
 import { useEffect, useState, type FormEvent } from "react"
-import { clearDeviceToken, getDeviceToken, pair } from "@/lib/pairing"
+import {
+  clearPairing,
+  getDeviceToken,
+  listPairings,
+  pair,
+  type Pairing,
+} from "@/lib/pairing"
 import { isLinkedIn } from "@/lib/linkedin"
 
 type ActiveTab = { id: number | undefined; url: string | undefined }
 
 export default function App() {
-  const [paired, setPaired] = useState<boolean | null>(null)
+  const [pairings, setPairings] = useState<Pairing[] | null>(null)
+  // A token stored before multi-site: it works, but its site is unknown until
+  // the side panel calls list-leads and adopts it. Shown as "paired" so this
+  // screen never tells a working install that it is not.
+  const [hasLegacy, setHasLegacy] = useState(false)
   const [code, setCode] = useState("")
   const [error, setError] = useState(false)
   const [busy, setBusy] = useState(false)
   const [activeTab, setActiveTab] = useState<ActiveTab | null>(null)
 
+  async function refresh() {
+    const list = await listPairings()
+    setPairings(list)
+    setHasLegacy(list.length === 0 && (await getDeviceToken()) !== null)
+  }
+
   useEffect(() => {
-    getDeviceToken().then((t) => setPaired(t !== null))
+    refresh()
   }, [])
 
   useEffect(() => {
@@ -41,7 +57,7 @@ export default function App() {
     setError(false)
     try {
       await pair(code.trim())
-      setPaired(true)
+      await refresh()
       setCode("")
     } catch {
       setError(true)
@@ -50,12 +66,12 @@ export default function App() {
     }
   }
 
-  async function handleUnpair() {
-    await clearDeviceToken()
-    setPaired(false)
+  async function handleUnpair(siteId: string) {
+    await clearPairing(siteId)
+    await refresh()
   }
 
-  if (paired === null) {
+  if (pairings === null) {
     return (
       <div className="bg-background text-foreground w-72 p-4 text-sm">Loading…</div>
     )
@@ -74,20 +90,35 @@ export default function App() {
             Open Glint panel
           </button>
         )}
-      {paired ? (
-        <>
-          <p className="text-sm text-green-600">Extension paired ✓</p>
-          <button
-            onClick={handleUnpair}
-            className="border-border bg-card hover:bg-accent rounded-md border px-3 py-1.5 text-sm transition-colors"
-          >
-            Unpair
-          </button>
-        </>
-      ) : (
+      {hasLegacy && <p className="text-sm text-green-600">Extension paired ✓</p>}
+
+      {pairings.length > 0 && (
+        <ul className="flex flex-col gap-2">
+          {pairings.map((p) => (
+            <li
+              key={p.siteId}
+              className="border-border bg-card flex items-center justify-between gap-2 rounded-md border px-3 py-1.5"
+            >
+              <span className="truncate text-sm">{p.siteName}</span>
+              <button
+                onClick={() => handleUnpair(p.siteId)}
+                className="text-muted-foreground hover:text-foreground text-xs transition-colors"
+              >
+                Unpair
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {/* Pairing stays available: a second code adds a second website rather
+          than replacing the first. */}
+      {(
         <form onSubmit={handlePair} className="flex flex-col gap-2">
           <label className="text-sm">
-            Paste your pairing code from Glint → Settings.
+            {pairings.length > 0 || hasLegacy
+              ? "Pair another website with a new code."
+              : "Paste your pairing code from Glint → Settings."}
           </label>
           <input
             value={code}

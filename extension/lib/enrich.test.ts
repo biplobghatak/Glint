@@ -44,6 +44,7 @@ const base: RunState = {
   page: 1,
   maxPages: 1,
   folderId: null,
+  siteId: null,
   seen: [],
   enrichQueue: [
     { leadId: "a", profilePath: "/in/a" },

@@ -1,4 +1,4 @@
-import { getDeviceToken } from "@/lib/pairing"
+import { getTokenForSite } from "@/lib/pairing"
 import type { LeadCandidate } from "@/lib/extract"
 
 const env = import.meta.env as unknown as Record<string, string>
@@ -38,9 +38,13 @@ export type ScoreResult = {
 
 export async function scoreLead(
   candidate: LeadCandidate,
-  folderId: string | null
+  folderId: string | null,
+  siteId: string | null = null
 ): Promise<ScoreResult | null> {
-  const device_token = await getDeviceToken()
+  // A run pins its site, so it keeps writing to the website it started on even
+  // if the panel switches. The passive scan passes null and follows the active
+  // site, which is what "score what I am looking at" should mean.
+  const device_token = await getTokenForSite(siteId)
   if (!device_token) return null
 
   try {
@@ -113,9 +117,10 @@ export type BatchScore = {
 // which is why the InvalidFolderError re-throw sits past the outer catch.
 export async function scoreLeads(
   candidates: LeadCandidate[],
-  folderId: string | null
+  folderId: string | null,
+  siteId: string | null = null
 ): Promise<BatchScore[] | null> {
-  const device_token = await getDeviceToken()
+  const device_token = await getTokenForSite(siteId)
   if (!device_token) return null
 
   try {

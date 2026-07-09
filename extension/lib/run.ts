@@ -26,6 +26,13 @@ export type RunState = {
    */
   folderId: string | null
   /**
+   * The site this run files its leads into, pinned at startRun. The panel's
+   * active site can change mid-run; this must not. Every score-lead call resolves
+   * its device_token from THIS id, so a switch cannot retarget leads already in
+   * flight. `null` only for a run started by a build that had no sites.
+   */
+  siteId: string | null
+  /**
    * Normalised profile paths already scored this run. An array, not a Set:
    * chrome.storage.local serialises to JSON. The content script rehydrates it
    * into a Set on load and writes it back as an array. This is the piece that

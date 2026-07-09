@@ -11,6 +11,8 @@ import {
 } from "lucide-react"
 
 import { cn } from "@/lib/utils"
+import type { Site } from "@/lib/sites"
+import { SiteSwitcher } from "./site-switcher"
 import { Button } from "@/components/ui/button"
 import {
   Sheet,
@@ -19,6 +21,8 @@ import {
   SheetTitle,
   SheetTrigger,
 } from "@/components/ui/sheet"
+
+type SiteProps = { sites: Site[]; activeSiteId: string | null }
 
 const NAV_LINKS = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboardIcon },
@@ -56,18 +60,19 @@ function SidebarNav({ onNavigate }: { onNavigate?: () => void }) {
   )
 }
 
-function Sidebar() {
+function Sidebar({ sites, activeSiteId }: SiteProps) {
   return (
     <aside className="border-sidebar-border bg-sidebar hidden h-full w-56 shrink-0 flex-col gap-6 overflow-y-auto border-r p-4 md:flex">
       <Link href="/dashboard" className="text-lg font-bold tracking-tight">
         Glint<span className="text-primary">.</span>
       </Link>
+      <SiteSwitcher sites={sites} activeSiteId={activeSiteId} />
       <SidebarNav />
     </aside>
   )
 }
 
-function MobileSidebar() {
+function MobileSidebar({ sites, activeSiteId }: SiteProps) {
   const [open, setOpen] = useState(false)
 
   return (
@@ -88,6 +93,7 @@ function MobileSidebar() {
             Glint<span className="text-primary">.</span>
           </SheetTitle>
         </SheetHeader>
+        <SiteSwitcher sites={sites} activeSiteId={activeSiteId} />
         <SidebarNav onNavigate={() => setOpen(false)} />
       </SheetContent>
     </Sheet>

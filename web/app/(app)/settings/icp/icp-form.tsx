@@ -37,7 +37,15 @@ function toArray(value: string): string[] {
     .filter(Boolean)
 }
 
-export function IcpForm({ userId, icp }: { userId: string; icp: Icp }) {
+export function IcpForm({
+  siteId,
+  siteName,
+  icp,
+}: {
+  siteId: string
+  siteName: string
+  icp: Icp
+}) {
   const supabase = createClient()
 
   const [websiteUrl, setWebsiteUrl] = useState(icp.website_url ?? "")
@@ -62,6 +70,10 @@ export function IcpForm({ userId, icp }: { userId: string; icp: Icp }) {
     // onboarding when it doesn't), and this is the one screen that is allowed
     // to write min_score — onboarding deliberately omits it so re-running
     // onboarding never resets the user's threshold.
+    //
+    // Scoped by site_id, never user_id: icps.user_id stopped being unique when
+    // sites arrived, so a user_id predicate would rewrite every one of this
+    // user's websites at once.
     const { error } = await supabase
       .from("icps")
       .update({
@@ -72,7 +84,7 @@ export function IcpForm({ userId, icp }: { userId: string; icp: Icp }) {
         raw_summary: rawSummary,
         min_score: score,
       })
-      .eq("user_id", userId)
+      .eq("site_id", siteId)
 
     setStatus(error ? "error" : "saved")
   }
@@ -83,7 +95,8 @@ export function IcpForm({ userId, icp }: { userId: string; icp: Icp }) {
         <CardHeader>
           <CardTitle>Ideal customer profile</CardTitle>
           <CardDescription>
-            Glint scores every lead against this profile. Put one item per line.
+            Glint scores every lead for {siteName} against this profile. Put one
+            item per line.
           </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-5">

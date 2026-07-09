@@ -12,13 +12,13 @@ export default async function Home() {
     return <Landing />
   }
 
-  const { data: icp } = await supabase
-    .from("icps")
-    .select("id")
-    .eq("user_id", user.id)
-    .maybeSingle()
+  // A user with no site has never finished onboarding. Sites came before ICPs
+  // once they existed, so this is the earlier and more reliable signal.
+  const { count } = await supabase
+    .from("sites")
+    .select("id", { count: "exact", head: true })
 
-  if (!icp) {
+  if (!count) {
     redirect("/onboarding")
   }
 

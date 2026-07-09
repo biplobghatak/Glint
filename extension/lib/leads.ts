@@ -38,6 +38,9 @@ export type ListLeadsResponse = {
   below_threshold_count: number
   min_score: number
   has_icp: boolean
+  /** The site this device_token resolves to. Lets an upgraded panel learn
+   *  which website its pre-multi-site token belongs to. */
+  site: { id: string; name: string } | null
   target_countries: string[]
   /** ICP columns that seed the query-composition chips, at zero extra latency. */
   target_roles: string[]

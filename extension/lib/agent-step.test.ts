@@ -15,6 +15,7 @@ const base: RunState = {
   page: 1,
   maxPages: 1,
   folderId: null,
+  siteId: null,
   seen: [],
   enrichQueue: [],
   openedTabIds: [],

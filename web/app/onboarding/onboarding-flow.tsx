@@ -3,6 +3,7 @@
 import { useState, type FormEvent } from "react"
 import { useRouter } from "next/navigation"
 import { createClient } from "@/lib/supabase/client"
+import { switchSite } from "@/lib/site-actions"
 import { Button } from "@/components/ui/button"
 import {
   Card,
@@ -205,12 +206,17 @@ export function OnboardingFlow({ userId }: { userId: string }) {
       },
       { onConflict: "site_id" }
     )
-    setLoading(false)
-
     if (saveError) {
+      setLoading(false)
       setError("Couldn't save your profile. Try again.")
       return
     }
+
+    // Land on the site that was just set up, not on whichever one the cookie
+    // still points at. Adding a second website otherwise drops the user back
+    // into the first one's inbox, which reads as the save having failed.
+    await switchSite(siteId)
+    setLoading(false)
     router.push("/inbox")
   }
 

@@ -66,8 +66,9 @@ const SCORE_ACCENT: Record<ScoreBucket, string> = {
 // that isn't the empty string (which Radix treats as "no value").
 const UNFILED = "__unfiled"
 
-// Postgres reports a folders_user_name_idx violation as 23505. The index is on
-// (user_id, lower(name)), so "Clients" and "clients" collide.
+// Postgres reports a folders_site_name_idx violation as 23505. The index is on
+// (site_id, lower(name)), so "Clients" and "clients" collide within one site —
+// but each site may have its own "Clients".
 const UNIQUE_VIOLATION = "23505"
 
 function scoreBucket(score: number | null): ScoreBucket {
@@ -128,10 +129,12 @@ export function LeadInbox({
   initialLeads,
   initialFolders,
   userId,
+  siteId,
 }: {
   initialLeads: Lead[]
   initialFolders: Folder[]
   userId: string
+  siteId: string
 }) {
   const supabase = createClient()
   const [leads, setLeads] = useState<Lead[]>(initialLeads)
@@ -152,7 +155,7 @@ export function LeadInbox({
           event: "INSERT",
           schema: "public",
           table: "leads",
-          filter: `user_id=eq.${userId}`,
+          filter: `site_id=eq.${siteId}`,
         },
         (payload) => {
           setLeads((cur) => {
@@ -172,7 +175,7 @@ export function LeadInbox({
           event: "UPDATE",
           schema: "public",
           table: "leads",
-          filter: `user_id=eq.${userId}`,
+          filter: `site_id=eq.${siteId}`,
         },
         (payload) => {
           const lead = payload.new as Lead
@@ -187,10 +190,10 @@ export function LeadInbox({
           event: "DELETE",
           schema: "public",
           table: "leads",
-          filter: `user_id=eq.${userId}`,
+          filter: `site_id=eq.${siteId}`,
         },
         (payload) => {
-          // `leads` is `replica identity full`, so the old row carries user_id
+          // `leads` is `replica identity full`, so the old row carries site_id
           // and this subscription's filter matches. Under the default replica
           // identity only the primary key is sent and no DELETE would arrive.
           const lead = payload.old as Partial<Lead>
@@ -203,7 +206,7 @@ export function LeadInbox({
     return () => {
       supabase.removeChannel(channel)
     }
-  }, [supabase, userId])
+  }, [supabase, siteId])
 
   // A folder created in the side panel must appear in this rail without a
   // refresh, and one deleted in another tab must disappear from it.
@@ -216,7 +219,7 @@ export function LeadInbox({
           event: "INSERT",
           schema: "public",
           table: "folders",
-          filter: `user_id=eq.${userId}`,
+          filter: `site_id=eq.${siteId}`,
         },
         (payload) => {
           const folder = payload.new as Folder
@@ -233,7 +236,7 @@ export function LeadInbox({
           event: "UPDATE",
           schema: "public",
           table: "folders",
-          filter: `user_id=eq.${userId}`,
+          filter: `site_id=eq.${siteId}`,
         },
         (payload) => {
           const folder = payload.new as Folder
@@ -250,7 +253,7 @@ export function LeadInbox({
           event: "DELETE",
           schema: "public",
           table: "folders",
-          filter: `user_id=eq.${userId}`,
+          filter: `site_id=eq.${siteId}`,
         },
         (payload) => {
           const folder = payload.old as Partial<Folder>
@@ -272,7 +275,7 @@ export function LeadInbox({
     return () => {
       supabase.removeChannel(channel)
     }
-  }, [supabase, userId])
+  }, [supabase, siteId])
 
   const counts = useMemo(() => {
     const map: Record<string, number> = {}
@@ -329,7 +332,7 @@ export function LeadInbox({
       setFolderError(null)
       const { data, error } = await supabase
         .from("folders")
-        .insert({ user_id: userId, name })
+        .insert({ user_id: userId, site_id: siteId, name })
         .select("id, name")
         .single()
 
@@ -349,7 +352,7 @@ export function LeadInbox({
       )
       return true
     },
-    [supabase, userId]
+    [supabase, userId, siteId]
   )
 
   const renameFolder = useCallback(

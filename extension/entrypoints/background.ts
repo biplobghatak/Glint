@@ -1,7 +1,7 @@
 import { isLinkedIn } from "@/lib/linkedin"
 import { parseQuery, buildSearchUrl, UnpairedError, NoIcpError, QueryServiceError, NetworkError } from "@/lib/query"
 import { getRunState, setRunState, clearRunState } from "@/lib/run"
-import { getDeviceToken } from "@/lib/pairing"
+import { getActiveSiteId, getDeviceToken } from "@/lib/pairing"
 import { sendRuntimeMessage, type RuntimeMessage, type WhichTabResponse, type EnrichResponse } from "@/lib/messages"
 
 const DEFAULT_MAX_LEADS = 100
@@ -390,6 +390,9 @@ async function startRun(
   try {
     const parsed = await parseQuery(query)
     const url = buildSearchUrl(parsed)
+    // Pinned once. Switching site in the panel mid-run must not retarget the
+    // leads this run is still writing.
+    const siteId = await getActiveSiteId()
     // Persist run state *before* navigating — the future content script
     // reads glint_run on load, so it must already be active by the time
     // the tab lands on the search results page.
@@ -406,6 +409,7 @@ async function startRun(
       page: 1,
       maxPages,
       folderId,
+      siteId,
       seen: [],
       enrichQueue: [],
       openedTabIds: [],

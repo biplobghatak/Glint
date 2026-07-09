@@ -179,6 +179,15 @@ Deno.serve(async (req: Request) => {
   const user_id = pairing.user_id
   const site_id = pairing.site_id
 
+  // The panel keys its token map by site and labels the switcher with the name.
+  // A token minted before sites existed carries no site the panel knows about,
+  // so this is how an upgraded extension learns which website it is paired to.
+  const { data: site } = await supabase
+    .from("sites")
+    .select("id, name")
+    .eq("id", site_id)
+    .maybeSingle()
+
   const { data: icp } = await supabase
     .from("icps")
     .select("min_score, target_countries, target_roles, company_types")
@@ -331,6 +340,7 @@ Deno.serve(async (req: Request) => {
       below_threshold_count: belowCount ?? 0,
       min_score,
       has_icp,
+      site,
       target_countries,
       target_roles,
       company_types,

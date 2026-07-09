@@ -6,7 +6,14 @@ import {
   useState,
   type FormEvent,
 } from "react"
-import { getDeviceToken } from "@/lib/pairing"
+import {
+  adoptLegacyPairing,
+  getActiveSiteId,
+  getDeviceToken,
+  listPairings,
+  setActiveSite,
+  type Pairing,
+} from "@/lib/pairing"
 import { getRunState } from "@/lib/run"
 import { getPanelState, setPanelState } from "@/lib/panel-state"
 import { sendRuntimeMessage, type RuntimeMessage } from "@/lib/messages"
@@ -52,6 +59,8 @@ function countryChips(targetCountries: string[], leads: Lead[]): string[] {
 
 export default function App() {
   const [paired, setPaired] = useState<boolean | null>(null)
+  const [pairings, setPairings] = useState<Pairing[]>([])
+  const [activeSiteId, setActiveSiteId] = useState<string | null>(null)
   // Guards the query-persistence effect below from firing (and overwriting
   // glint_panel with an empty query) before the mount effect has rehydrated
   // state from it.
@@ -138,7 +147,7 @@ export default function App() {
     // just re-check pairing — or an in-flight run becomes invisible/
     // unstoppable and Start would fire a second, overlapping run.
     Promise.all([getDeviceToken(), getRunState(), getPanelState()]).then(
-      ([token, run, panel]) => {
+      async ([token, run, panel]) => {
         if (run?.active) {
           setRunning(true)
           setQuery(run.query)
@@ -164,6 +173,10 @@ export default function App() {
           setScreen(panel.destinationChosen ? "query" : "folder")
         }
         setPaired(token !== null)
+        // Populate the switcher before the first list-leads round-trip, so a
+        // multi-site panel does not flash the single-site caption on mount.
+        setPairings(await listPairings())
+        setActiveSiteId(await getActiveSiteId())
         setHydrated(true)
       }
     )
@@ -238,7 +251,7 @@ export default function App() {
     const requestFilter: LeadFilter = revealed ? { ...filter, minScore: 0 } : filter
 
     listLeads(requestFilter, null, controller.signal)
-      .then((res) => {
+      .then(async (res) => {
         setLeads(res.leads)
         setCursor(res.next_cursor)
         setBelowThresholdCount(res.below_threshold_count)
@@ -246,6 +259,15 @@ export default function App() {
         setTargetRoles(res.target_roles)
         setCompanyTypes(res.company_types)
         setHasIcp(res.has_icp)
+        // A token stored before sites existed has no entry in the pairing map.
+        // list-leads is the first thing the panel calls, and it reports which
+        // site the server resolved, so this is where the token gets re-keyed.
+        // adoptLegacyPairing is a no-op once the map holds an entry.
+        if (res.site) {
+          await adoptLegacyPairing(res.site.id, res.site.name)
+          setPairings(await listPairings())
+          setActiveSiteId(await getActiveSiteId())
+        }
         setSavedMinScore(res.min_score)
         setSliderValue((v) => (v === res.min_score ? v : res.min_score))
         setFolders(res.folders)
@@ -271,8 +293,10 @@ export default function App() {
 
     return () => controller.abort()
     // savedMinScore participates because the server resolves a null
-    // filter.minScore against it.
-  }, [paired, filter, revealed, savedMinScore, refreshKey])
+    // filter.minScore against it. activeSiteId participates because the request
+    // carries the active site's token: switching site must refetch, or the panel
+    // keeps showing the previous website's leads.
+  }, [paired, filter, revealed, savedMinScore, refreshKey, activeSiteId])
 
   const handleLoadMore = useCallback(() => {
     if (!cursor || loadingMore) return
@@ -456,11 +480,34 @@ export default function App() {
   return (
     <div className="bg-background text-foreground flex h-full flex-col gap-4 overflow-y-auto p-4">
       <header className="flex items-start justify-between gap-2">
-        <div className="flex flex-col gap-0.5">
+        <div className="flex min-w-0 flex-col gap-0.5">
           <h1 className="text-base font-semibold">Glint</h1>
-          <p className="text-muted-foreground text-xs">
-            Find and score LinkedIn leads against your ICP
-          </p>
+          {/* One website is not a choice, so it is a caption, not a control.
+              Disabled during a run: the run pinned its site at start, and a
+              switch here would only mislead about where leads are landing. */}
+          {pairings.length > 1 ? (
+            <select
+              value={activeSiteId ?? ""}
+              disabled={running}
+              aria-label="Active website"
+              onChange={async (e) => {
+                const next = e.target.value
+                await setActiveSite(next)
+                setActiveSiteId(next)
+              }}
+              className="border-border bg-card max-w-full truncate rounded-md border px-2 py-1 text-xs disabled:opacity-50"
+            >
+              {pairings.map((p) => (
+                <option key={p.siteId} value={p.siteId}>
+                  {p.siteName}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <p className="text-muted-foreground text-xs">
+              Find and score LinkedIn leads against your ICP
+            </p>
+          )}
         </div>
         <button
           type="button"

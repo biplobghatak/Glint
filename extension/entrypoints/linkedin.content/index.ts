@@ -258,7 +258,11 @@ async function runPageStep(myTabId: number, hud: HudHandle) {
 
     let batch: BatchScore[] | null
     try {
-      batch = await scoreLeads(pending.map((p) => p.cand), initial.folderId)
+      batch = await scoreLeads(
+        pending.map((p) => p.cand),
+        initial.folderId,
+        initial.siteId
+      )
     } catch (err) {
       if (err instanceof InvalidFolderError) {
         await stopRun("That folder was deleted. Pick another and start again.")
@@ -316,7 +320,7 @@ async function runPageStep(myTabId: number, hud: HudHandle) {
       if (item.needsFetch) {
         hud.update({ status: `Scoring ${cand.name ?? "a lead"}…` })
         try {
-          result = await scoreLead(cand, initial.folderId)
+          result = await scoreLead(cand, initial.folderId, initial.siteId)
         } catch (err) {
           node.classList.remove(SCANNING_CLASS)
           if (err instanceof InvalidFolderError) {

@@ -1,5 +1,6 @@
 import { redirect } from "next/navigation"
 import { createClient } from "@/lib/supabase/server"
+import { getActiveSite, listSites } from "@/lib/sites"
 import { AppShell } from "@/components/app-shell/app-shell"
 
 export default async function AppLayout({
@@ -16,5 +17,16 @@ export default async function AppLayout({
     redirect("/login")
   }
 
-  return <AppShell email={user.email ?? ""}>{children}</AppShell>
+  const sites = await listSites()
+  const active = await getActiveSite(sites)
+
+  return (
+    <AppShell
+      email={user.email ?? ""}
+      sites={sites}
+      activeSiteId={active?.id ?? null}
+    >
+      {children}
+    </AppShell>
+  )
 }
