@@ -1,18 +1,22 @@
 import { browser } from "wxt/browser"
-import { extractFromNode, type LeadCandidate } from "@/lib/extract"
+import { extractFromNode, findSearchResultCards, type LeadCandidate } from "@/lib/extract"
 import { scoreLead } from "@/lib/score"
 import { getRunState, setRunState, clearRunState, type RunState } from "@/lib/run"
 import type { RuntimeMessage, WhichTabMessage, WhichTabResponse } from "@/lib/messages"
 
-const SEARCH_RESULT_SELECTOR =
-  'li.reusable-search__result-container, div.entity-result, [data-view-name="search-entity-result"]'
+const FEED_POST_SELECTOR = 'div.feed-shared-update-v2, [data-urn*="urn:li:activity"]'
 
-// UNVERIFIED against live LinkedIn markup — best-effort guess from the plan.
-// If this stops matching, clickNextPage() degrades gracefully to a scroll
-// (see the fallback below), so a wrong selector never breaks the run, but a
-// human should inspect the real "next page" button's aria-label/selector and
-// update this single constant.
-const NEXT_PAGE_SELECTOR = 'button[aria-label="Next"]:not([disabled])'
+// UNVERIFIED against live LinkedIn markup — best-effort guesses, tried in
+// order. The first one that matches a non-disabled button wins. If none of
+// these match, clickNextPage() degrades gracefully to a scroll (see the
+// fallback below), so a wrong selector never breaks the run, but a human
+// should inspect the real "next page" button's aria-label/selector and
+// update this list. Do not add more guesses beyond these three.
+const NEXT_PAGE_SELECTORS = [
+  'button[aria-label="Next"]:not([disabled])',
+  'button[aria-label*="Next"]:not([disabled])',
+  ".artdeco-pagination__button--next:not([disabled])",
+] as const
 
 function randomDelay(minMs: number, maxMs: number): Promise<void> {
   const ms = minMs + Math.random() * (maxMs - minMs)
@@ -24,10 +28,14 @@ function hasCommercialLimitBanner(): boolean {
 }
 
 function clickNextPage(): boolean {
-  const next = document.querySelector<HTMLButtonElement>(NEXT_PAGE_SELECTOR)
-  if (!next) return false
-  next.click()
-  return true
+  for (const selector of NEXT_PAGE_SELECTORS) {
+    const next = document.querySelector<HTMLButtonElement>(selector)
+    if (next) {
+      next.click()
+      return true
+    }
+  }
+  return false
 }
 
 function badgeColor(score: number): string {
@@ -114,6 +122,15 @@ async function runAgentLoop(myTabId: number) {
   // stop reason. See the staleRounds >= 3 branch below.
   let paginationSucceededOnce = false
   let warnedAboutNextSelector = false
+  // Tracks whether findSearchResultCards() has EVER found a single card
+  // during this run (found, not necessarily scored) — distinct from
+  // paginationSucceededOnce. Without this, "no cards ever matched" (the
+  // selectors are stale) and "cards matched but pagination never worked"
+  // both end in the same 3-stale-rounds stop, and would be reported with
+  // the same (wrong, for the first case) message. See the staleRounds >= 3
+  // branch below for the precedence this drives.
+  let everFoundCard = false
+  let warnedAboutNoCards = false
 
   while (true) {
     // Always re-read fresh state at the top of the outer loop — never trust
@@ -146,7 +163,8 @@ async function runAgentLoop(myTabId: number) {
       return
     }
 
-    const cards = Array.from(document.querySelectorAll(SEARCH_RESULT_SELECTOR))
+    const cards = findSearchResultCards(document)
+    if (cards.length > 0) everFoundCard = true
     let scoredThisBatch = 0
 
     for (const node of cards) {
@@ -203,16 +221,28 @@ async function runAgentLoop(myTabId: number) {
     if (scoredThisBatch === 0) {
       staleRounds++
       if (staleRounds >= 3) {
-        // Same symptom (3 stale rounds), two very different causes: either
-        // we truly reached the end of results, or NEXT_PAGE_SELECTOR never
-        // matched anything and we've been stuck on page 1 the whole time.
-        // Report them differently so this isn't indistinguishable from a
-        // successful complete run.
-        await stopRun(
-          paginationSucceededOnce
-            ? "No more new results found"
-            : "Couldn't find LinkedIn's next-page button — stopped after the first page of results."
-        )
+        // Same symptom (3 stale rounds), three very different causes.
+        // Precedence matters: "no cards at all" must be reported before
+        // "no next-page button", since a run that never found a card also
+        // never had a reason to paginate — reporting the pagination
+        // message in that case would point the reader at the wrong file.
+        let reason: string
+        if (!everFoundCard) {
+          if (!warnedAboutNoCards) {
+            warnedAboutNoCards = true
+            console.warn(
+              "Glint: findSearchResultCards() never found a single result card on this page — check its known selectors and structural discovery against the current LinkedIn markup."
+            )
+          }
+          reason =
+            "Couldn't find LinkedIn's result cards — the page layout may have changed."
+        } else if (!paginationSucceededOnce) {
+          reason =
+            "Couldn't find LinkedIn's next-page button — stopped after the first page of results."
+        } else {
+          reason = "No more new results found"
+        }
+        await stopRun(reason)
         return
       }
     } else {
@@ -225,7 +255,7 @@ async function runAgentLoop(myTabId: number) {
       if (!warnedAboutNextSelector) {
         warnedAboutNextSelector = true
         console.warn(
-          `Glint: NEXT_PAGE_SELECTOR ('${NEXT_PAGE_SELECTOR}') did not match a "Next" button — falling back to scroll. LinkedIn's markup may have changed.`
+          `Glint: none of NEXT_PAGE_SELECTORS (${NEXT_PAGE_SELECTORS.map((s) => `'${s}'`).join(", ")}) matched a "Next" button — falling back to scroll. LinkedIn's markup may have changed.`
         )
       }
       window.scrollBy(0, window.innerHeight * 0.8)
@@ -293,9 +323,10 @@ export default defineContentScript({
 
     function scan(root: ParentNode) {
       if (agentActive) return
-      const candidates = root.querySelectorAll(
-        'div.feed-shared-update-v2, [data-urn*="urn:li:activity"], li.reusable-search__result-container, div.entity-result, [data-view-name="search-entity-result"]'
-      )
+      const candidates: Element[] = [
+        ...Array.from(root.querySelectorAll(FEED_POST_SELECTOR)),
+        ...findSearchResultCards(root),
+      ]
       candidates.forEach((node) => {
         const cand = extractFromNode(node)
         if (!cand) return
