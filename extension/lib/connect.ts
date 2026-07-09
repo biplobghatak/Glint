@@ -75,6 +75,62 @@ export function findMoreButton(root: ParentNode): HTMLElement | null {
 }
 
 /**
+ * Any button from the profile's own action bar.
+ *
+ * The evidence that the top card has finished rendering. The content script runs
+ * at document_idle, but LinkedIn paints the action bar in React some time after
+ * that — so a Connect search fired the instant a profile loads finds nothing,
+ * every time, and reports "no Connect button" for a profile that plainly has
+ * one. Waiting on THIS, rather than on Connect itself, is what keeps the absence
+ * of Connect meaningful: once Message or Follow exist, the bar is painted, and a
+ * missing Connect is a real fact about the relationship rather than a race.
+ */
+export function findProfileAction(root: ParentNode): HTMLElement | null {
+  return findClickable(
+    root,
+    (label) =>
+      /^connect$/i.test(label) ||
+      /^invite\b.*\bto connect$/i.test(label) ||
+      /^more actions?$/i.test(label) ||
+      /^more$/i.test(label) ||
+      /^message\b/i.test(label) ||
+      /^follow$/i.test(label)
+  )
+}
+
+/**
+ * Connect, inside the overflow menu that `trigger` just opened.
+ *
+ * Scoped to the dropdown rather than re-searching the page. `main` contains the
+ * "People similar to…" rail, whose cards carry their own Connect buttons — a
+ * page-wide search for `^connect$` can therefore invite an entirely different
+ * person. Falls back to any open menu, then gives up: inviting the wrong human
+ * is worse than not inviting anyone.
+ */
+export function findConnectInMenu(trigger: HTMLElement): HTMLElement | null {
+  const dropdown = trigger.closest('[class*="dropdown"]')
+  if (dropdown) {
+    const inDropdown = findConnectButton(dropdown)
+    if (inDropdown) return inDropdown
+  }
+  const menu = document.querySelector('[role="menu"]')
+  return menu ? findConnectButton(menu) : null
+}
+
+/**
+ * LinkedIn's invitation-note textarea, if a note dialog is open right now.
+ *
+ * Distinct from the poll inside openConnectAndFill: this answers "is there a
+ * note box on screen that the USER opened", which is what lets the draft card's
+ * Insert button work after Glint's own attempt failed. A textarea LinkedIn keeps
+ * mounted but hidden is not an open note box.
+ */
+export function findOpenNoteTextarea(): HTMLTextAreaElement | null {
+  const el = document.querySelector<HTMLTextAreaElement>(NOTE_TEXTAREA_SELECTOR)
+  return el && el.offsetParent !== null ? el : null
+}
+
+/**
  * The "Add a note" control inside the invite dialog.
  *
  * Free accounts get a limited number of noted invites per month; when that runs
@@ -87,6 +143,15 @@ export function findAddNoteButton(root: ParentNode): HTMLElement | null {
 
 const NOTE_TEXTAREA_SELECTOR =
   'textarea[name="message"], #custom-message, textarea#custom-message'
+
+/**
+ * How long to wait for LinkedIn to render a profile's action bar.
+ *
+ * Generous on purpose. The cost of waiting too long is a draft card that appears
+ * a beat late; the cost of not waiting long enough is telling the user a profile
+ * has no Connect button while they are looking straight at one.
+ */
+const PROFILE_RENDER_TIMEOUT_MS = 8000
 
 /** Polls `query` until it returns non-null or `timeoutMs` elapses. Never throws. */
 function waitFor<T extends Element>(
@@ -154,14 +219,25 @@ function debugClickables(): void {
 export async function openConnectAndFill(draft: string): Promise<ConnectOutcome> {
   const scope: ParentNode = document.querySelector("main") ?? document
 
+  // Wait for the profile to actually paint its action bar. Without this the
+  // whole function ran against an empty top card and returned "no_button" on
+  // every profile, including ones showing a Connect button a second later. This
+  // resolves the moment ANY action button exists, so it costs nothing on a fast
+  // page and does not extend the wait when Connect is genuinely absent.
+  if (!(await waitFor(() => findProfileAction(scope), PROFILE_RENDER_TIMEOUT_MS))) {
+    debugClickables()
+    return "no_button"
+  }
+
   let button = findConnectButton(scope)
   if (!button) {
     const moreButton = findMoreButton(scope)
     if (moreButton) {
       moreButton.click()
-      // The dropdown mounts asynchronously; re-search the whole scope rather
-      // than the trigger's subtree, since LinkedIn portals the menu elsewhere.
-      button = await waitFor(() => findConnectButton(scope), 2000)
+      // The dropdown mounts asynchronously, and is searched through its own
+      // trigger: `main` also holds the "People similar to…" rail, whose cards
+      // carry Connect buttons for other people entirely.
+      button = await waitFor(() => findConnectInMenu(moreButton), 2000)
     }
   }
   if (!button) {

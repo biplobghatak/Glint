@@ -1,4 +1,8 @@
-import type { ConnectOutcome } from "@/lib/connect"
+import {
+  findOpenNoteTextarea,
+  setReactTextareaValue,
+  type ConnectOutcome,
+} from "@/lib/connect"
 import type { StoredDraft } from "@/lib/draft"
 
 /**
@@ -20,11 +24,11 @@ export function displayName(raw: string): string {
 function fallbackReason(outcome: ConnectOutcome): string {
   switch (outcome) {
     case "no_button":
-      return "No Connect button on this profile — you may already be connected, or an invite is pending. Copy the note instead."
+      return "No Connect button on this profile — you may already be connected, or an invite is pending. Open Connect yourself and press Insert, or copy the note."
     case "no_note_option":
       return "LinkedIn didn't offer a note field. Free accounts get a limited number of noted invites each month. Copy the note instead."
     case "no_textarea":
-      return "Couldn't open LinkedIn's connect dialog — copy the note instead."
+      return "Couldn't open LinkedIn's connect dialog. Open it yourself and press Insert, or copy the note."
     case "filled":
       return ""
   }
@@ -54,6 +58,25 @@ function findOpenComposer(): HTMLElement | null {
     if (el && el.offsetParent !== null) return el
   }
   return null
+}
+
+/**
+ * Somewhere on screen that this draft can legitimately go.
+ *
+ * The invite note comes FIRST. When Glint's own Connect attempt fails, the user
+ * very often opens the dialog themselves — which is precisely the moment the
+ * card said "copy the note instead" while an empty note box sat open behind it.
+ * A message composer is the fallback.
+ */
+type InsertTarget =
+  | { kind: "note"; el: HTMLTextAreaElement }
+  | { kind: "composer"; el: HTMLElement }
+
+function findInsertTarget(): InsertTarget | null {
+  const note = findOpenNoteTextarea()
+  if (note) return { kind: "note", el: note }
+  const composer = findOpenComposer()
+  return composer ? { kind: "composer", el: composer } : null
 }
 
 /**
@@ -176,40 +199,53 @@ export function renderDraftCard(
 
   // Fallback: the Connect dialog couldn't be opened. Copy the note, or insert it
   // into an open message composer. This is a real, working path — not a stub.
-  const insert = el("button", "primary", "Insert into composer")
+  const INSERT_LABEL = "Insert"
+  const insert = el("button", "primary", INSERT_LABEL)
   insert.type = "button"
   insert.addEventListener("click", () => {
-    const composer = findOpenComposer()
-    if (!composer) {
-      syncComposerState()
+    const target = findInsertTarget()
+    if (!target) {
+      syncTargetState()
       return
     }
-    insertIntoComposer(composer, draft.opener)
+    // A note textarea is React-controlled: writing `.value` never reaches
+    // React's state and the invite posts empty. A composer is a contenteditable
+    // and needs execCommand. Same goal, two entirely different mechanisms.
+    if (target.kind === "note") {
+      target.el.focus()
+      setReactTextareaValue(target.el, draft.opener)
+    } else {
+      insertIntoComposer(target.el, draft.opener)
+    }
     insert.textContent = "Inserted"
-    setTimeout(() => (insert.textContent = "Insert into composer"), 1500)
+    setTimeout(() => (insert.textContent = INSERT_LABEL), 1500)
   })
   actions.append(insert)
   card.append(actions)
 
   card.append(el("p", "fallback-note", fallbackReason(outcome)))
 
-  // Insert stays disabled until LinkedIn's composer is actually open. Glint
+  // Insert stays disabled until somewhere to insert INTO is actually open. Glint
   // never opens it, and never sends — the user reviews the text and presses
   // LinkedIn's own Send.
-  const hint = el("p", "hint", "Open LinkedIn's message box first, then Insert.")
+  const hint = el(
+    "p",
+    "hint",
+    "Open LinkedIn's connect note or message box first, then Insert."
+  )
   card.append(hint)
 
-  function syncComposerState() {
-    const open = findOpenComposer() !== null
+  function syncTargetState() {
+    const open = findInsertTarget() !== null
     insert.disabled = !open
     hint.style.display = open ? "none" : ""
   }
-  syncComposerState()
+  syncTargetState()
 
-  // The user almost always opens the composer *after* this card appears. Poll
-  // rather than demand a reload — cheap, bounded to the card's lifetime, and off
-  // LinkedIn's own event paths.
-  const pollId = setInterval(syncComposerState, 700)
+  // The user almost always opens the note dialog or composer *after* this card
+  // appears. Poll rather than demand a reload — cheap, bounded to the card's
+  // lifetime, and off LinkedIn's own event paths.
+  const pollId = setInterval(syncTargetState, 700)
 
   container.append(card)
   return () => clearInterval(pollId)

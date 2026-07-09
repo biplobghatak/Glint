@@ -2,9 +2,73 @@ import { describe, expect, it, vi } from "vitest"
 import {
   findAddNoteButton,
   findConnectButton,
+  findConnectInMenu,
   findMoreButton,
+  findProfileAction,
   setReactTextareaValue,
 } from "./connect"
+
+describe("findProfileAction", () => {
+  // The gate that tells "this profile has no Connect" apart from "this profile
+  // has not rendered yet". Before it existed, openConnectAndFill ran against an
+  // empty top card and reported no_button on every single profile.
+  it("finds nothing on a top card that has not rendered", () => {
+    const root = document.createElement("div")
+    root.innerHTML = `<div class="top-card"></div>`
+    expect(findProfileAction(root)).toBeNull()
+  })
+
+  it("is satisfied by Message or Follow, not only Connect", () => {
+    for (const label of ["Message", "Follow", "More actions", "Connect"]) {
+      const root = document.createElement("div")
+      root.innerHTML = `<button aria-label="${label}">${label}</button>`
+      expect(findProfileAction(root), label).not.toBeNull()
+    }
+  })
+
+  // "Message Clara Toombs" is how LinkedIn labels it on a real profile.
+  it("matches a Message button carrying the member's name", () => {
+    const root = document.createElement("div")
+    root.innerHTML = `<button aria-label="Message Clara Toombs">Message</button>`
+    expect(findProfileAction(root)).not.toBeNull()
+  })
+})
+
+describe("findConnectInMenu", () => {
+  // `main` also holds the "People similar to…" rail, whose cards carry their own
+  // Connect buttons. A page-wide search invites the wrong human.
+  it("ignores a Connect button outside the opened dropdown", () => {
+    document.body.innerHTML = `
+      <main>
+        <div class="artdeco-dropdown">
+          <button id="more" aria-label="More actions">More</button>
+          <div class="artdeco-dropdown__content">
+            <div role="button" aria-label="Invite Clara Toombs to connect">Connect</div>
+          </div>
+        </div>
+        <aside>
+          <button aria-label="Invite Adam Stockwell to connect">Connect</button>
+        </aside>
+      </main>`
+    const trigger = document.querySelector<HTMLElement>("#more")!
+    const found = findConnectInMenu(trigger)
+    expect(found?.getAttribute("aria-label")).toBe("Invite Clara Toombs to connect")
+  })
+
+  it("returns null when the dropdown holds no Connect", () => {
+    document.body.innerHTML = `
+      <main>
+        <div class="artdeco-dropdown">
+          <button id="more" aria-label="More actions">More</button>
+          <div class="artdeco-dropdown__content">
+            <div role="button">Follow</div>
+          </div>
+        </div>
+      </main>`
+    const trigger = document.querySelector<HTMLElement>("#more")!
+    expect(findConnectInMenu(trigger)).toBeNull()
+  })
+})
 
 describe("setReactTextareaValue", () => {
   // LinkedIn's textarea is React-controlled. `el.value = text` updates the DOM

@@ -45,7 +45,9 @@ describe("renderDraftCard", () => {
     const buttons = Array.from(container.querySelectorAll("button")).map(
       (b) => b.textContent
     )
-    expect(buttons).toContain("Insert into composer")
+    // Renamed from "Insert into composer": the button now also fills LinkedIn's
+    // invitation-note box, which is not a composer.
+    expect(buttons).toContain("Insert")
     expect(buttons).toContain("Copy")
     teardown()
   })
