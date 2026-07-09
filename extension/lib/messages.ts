@@ -7,6 +7,17 @@ export type StartRunMessage = {
   maxPages: number
   /** Run destination. `null` means unfiled. Never `""`. */
   folderId: string | null
+  /**
+   * The tab the run should drive: the one the side panel is attached to, which
+   * the panel resolves for itself (a side panel has no `sender.tab`). `null`
+   * when it could not be resolved.
+   *
+   * A request, not an instruction. The background re-checks that the tab exists
+   * and is on LinkedIn before adopting it, and opens its own window if not — it
+   * is about to hand this id to chrome.tabs.update, and a navigation primitive
+   * does not take a tab id on trust.
+   */
+  tabId: number | null
 }
 export type StopRunMessage = { type: "STOP_RUN" }
 // A run halts for four reasons and only one of them is a stop. Pause keeps

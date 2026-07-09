@@ -80,14 +80,26 @@ function enrichableLeads(leads: Lead[]): EnrichTarget[] {
   return targets
 }
 
-// Chips the user can pick from: the ICP's target geography, plus any country
-// actually present on the rows loaded so far. Unknown is prepended by FilterBar.
-function countryChips(targetCountries: string[], leads: Lead[]): string[] {
-  const set = new Set(targetCountries)
-  for (const lead of leads) {
-    if (lead.country) set.add(lead.country)
+/**
+ * The tab this side panel is attached to — the one a run will drive.
+ *
+ * The panel has to ask for itself. A side panel is an extension page, not a
+ * content script, so the background sees no `sender.tab` on the messages it
+ * sends and cannot infer which tab the user was looking at.
+ *
+ * `currentWindow` is the window hosting this panel. Since the panel is only
+ * enabled on LinkedIn tabs (syncPanelForTab), the active tab of that window is
+ * a LinkedIn tab whenever Start is pressable. The background re-checks that
+ * anyway before it navigates anything.
+ */
+async function currentTabId(): Promise<number | null> {
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
+    return tab?.id ?? null
+  } catch {
+    // A null here is not fatal: the background opens its own window instead.
+    return null
   }
-  return Array.from(set).sort()
 }
 
 export default function App() {
@@ -501,7 +513,7 @@ export default function App() {
     [leads, folders, filter.folderId]
   )
 
-  function handleStart(e: FormEvent) {
+  async function handleStart(e: FormEvent) {
     e.preventDefault()
     const trimmed = query.trim()
     if (!trimmed) return
@@ -514,7 +526,13 @@ export default function App() {
     // rehydrates the real value on its next mount.
     setStartedAt(Date.now())
     setNow(Date.now())
-    sendRuntimeMessage({ type: "START_RUN", query: trimmed, maxPages, folderId: destination })
+    sendRuntimeMessage({
+      type: "START_RUN",
+      query: trimmed,
+      maxPages,
+      folderId: destination,
+      tabId: await currentTabId(),
+    })
   }
 
   function handleStop() {
@@ -560,7 +578,6 @@ export default function App() {
 
   // Keeps the previous rows painted while a new filter's results are in flight.
   const visibleLeads = useDeferredValue(leads)
-  const chips = countryChips(targetCountries, visibleLeads)
   // folderId !== null covers both "unfiled" ("") and a specific folder; an empty
   // result under either is a filter miss, not an empty inbox.
   const filtersActive =
@@ -700,15 +717,19 @@ export default function App() {
             {/* Tappable chips drawn from the user's own ICP. Tapping one fills
                 the query box; nothing runs until Start. Selection is derived
                 from the query text, so hand-editing the textarea keeps the chips
-                honest. Renders nothing unless the ICP actually has chips. */}
-            {hasIcp === true && (
+                honest. Renders nothing unless the ICP actually has chips.
+
+                They are composition tools, so they exist only while the user is
+                composing: Start hides them for the run's duration. A PAUSED run
+                counts as a run — otherwise the chips would reappear every time
+                Chrome hid the tab and the run paused itself. */}
+            {hasIcp === true && !running && !paused && (
               <IcpChips
                 roles={targetRoles}
                 companies={companyTypes}
                 countries={targetCountries}
                 query={query}
                 onChange={setQuery}
-                disabled={running}
               />
             )}
             <textarea
@@ -748,13 +769,22 @@ export default function App() {
               />
             </div>
             {!running && !paused ? (
-              <button
-                type="submit"
-                className="bg-primary text-primary-foreground rounded-[var(--radius)] px-3 py-1.5 text-sm font-medium transition-opacity hover:opacity-90 disabled:opacity-50"
-                disabled={query.trim().length === 0}
-              >
-                Start
-              </button>
+              <>
+                <button
+                  type="submit"
+                  className="bg-primary text-primary-foreground rounded-[var(--radius)] px-3 py-1.5 text-sm font-medium transition-opacity hover:opacity-90 disabled:opacity-50"
+                  disabled={query.trim().length === 0}
+                >
+                  Start
+                </button>
+                {/* Not a nicety. Chrome freezes hidden tabs, so a run whose tab
+                    goes to the background pauses itself — and a user who does
+                    not know the run lives in THIS tab reads that pause as the
+                    extension breaking. */}
+                <p className="text-muted-foreground text-xs">
+                  Glint runs in this tab. Keep it in front while it works.
+                </p>
+              </>
             ) : (
               <div className="flex gap-2">
                 <button
@@ -858,7 +888,6 @@ export default function App() {
             onChange={setFilter}
             query={searchInput}
             onQueryChange={setSearchInput}
-            countries={chips}
             minScore={sliderValue}
             onMinScoreChange={handleMinScoreChange}
             folders={folders}

@@ -1,11 +1,5 @@
 import { useState, type FormEvent } from "react"
-import {
-  countryLabel,
-  toggleCountry,
-  UNKNOWN_COUNTRY,
-  type LeadFilter,
-  type LeadSort,
-} from "@/lib/filter"
+import { type LeadFilter, type LeadSort } from "@/lib/filter"
 import type { FolderRow } from "@/lib/folders"
 import { formatScore } from "@/lib/format"
 
@@ -35,18 +29,15 @@ function fromSelectValue(value: string): string | null {
   return value
 }
 
-const chipClass = (active: boolean) =>
-  "rounded-full border px-2 py-0.5 text-xs transition-colors " +
-  (active
-    ? "border-primary bg-primary text-primary-foreground"
-    : "border-border bg-card text-muted-foreground hover:bg-accent")
-
+// The country chips are gone from this bar. `LeadFilter.countries` remains, and
+// remains honoured end to end (toggleCountry, list-leads' `or=` params) — there
+// is simply no control that sets it, so it is permanently empty and every
+// country, including Unknown, is shown. The filter is dormant, not deleted.
 export function FilterBar({
   filter,
   onChange,
   query,
   onQueryChange,
-  countries,
   minScore,
   onMinScoreChange,
   folders,
@@ -59,8 +50,6 @@ export function FilterBar({
   /** Raw, undebounced input value. filter.q lags it by the debounce interval. */
   query: string
   onQueryChange: (value: string) => void
-  /** Chip set: the ICP's target geography unioned with countries seen on loaded rows. */
-  countries: string[]
   /** The user's saved icps.min_score, not a per-request override. */
   minScore: number
   onMinScoreChange: (value: number) => void
@@ -93,46 +82,6 @@ export function FilterBar({
         aria-label="Search leads"
         className="border-border bg-card focus-visible:ring-ring rounded-[var(--radius)] border px-3 py-1.5 text-sm outline-none focus-visible:ring-2"
       />
-
-      <div className="flex flex-col gap-1.5">
-        <div className="flex items-center justify-between">
-          <span className="text-xs font-medium">Country</span>
-          {filter.countries.length > 0 && (
-            <button
-              type="button"
-              onClick={() => onChange({ ...filter, countries: [] })}
-              className="text-muted-foreground hover:text-foreground text-xs underline"
-            >
-              All countries
-            </button>
-          )}
-        </div>
-        <div className="flex flex-wrap gap-1.5">
-          {/* Unknown is listed first and is included automatically the moment
-              the user activates the country filter. Every lead scored before
-              the country column existed has country = null; a filter that
-              dropped them all silently would read as data loss. */}
-          {[UNKNOWN_COUNTRY, ...countries].map((code) => {
-            const active = filter.countries.includes(code)
-            return (
-              <button
-                key={code || "unknown"}
-                type="button"
-                aria-pressed={active}
-                onClick={() => onChange(toggleCountry(filter, code))}
-                className={chipClass(active)}
-              >
-                {countryLabel(code)}
-              </button>
-            )
-          })}
-        </div>
-        {filter.countries.length === 0 && (
-          <p className="text-muted-foreground text-xs">
-            Showing every country, including leads with no country.
-          </p>
-        )}
-      </div>
 
       <div className="flex flex-col gap-1.5">
         <div className="flex items-center justify-between">

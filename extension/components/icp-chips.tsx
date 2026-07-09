@@ -23,20 +23,20 @@ function buildChips(
   return chips
 }
 
+// No `disabled` prop: the panel unmounts these while a run is live or paused,
+// so there is no state in which a chip is on screen but unusable.
 export function IcpChips({
   roles,
   companies,
   countries,
   query,
   onChange,
-  disabled,
 }: {
   roles: string[]
   companies: string[]
   countries: string[]
   query: string
   onChange: (next: string) => void
-  disabled: boolean
 }) {
   const chips = buildChips(roles, companies, countries)
   // No roles, no company types, no countries: render nothing rather than an
@@ -63,10 +63,9 @@ export function IcpChips({
             key={`${chip.kind}:${chip.text}`}
             type="button"
             aria-pressed={chip.selected}
-            disabled={disabled}
             onClick={() => onChange(toggleChip(query, chip.text, chip.kind))}
             className={
-              "rounded-full border px-2.5 py-0.5 text-xs transition-colors disabled:opacity-50 " +
+              "rounded-full border px-2.5 py-0.5 text-xs transition-colors " +
               (chip.selected
                 ? "border-primary bg-primary text-primary-foreground"
                 : "border-border bg-card text-foreground hover:bg-accent")

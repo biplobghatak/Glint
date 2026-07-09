@@ -92,3 +92,41 @@ export function buildSearchUrl(parsed: ParsedQuery, page = 1): string {
   if (page > 1) params.set("page", String(page))
   return `https://www.linkedin.com/search/results/people/?${params.toString()}`
 }
+
+const SEARCH_RESULTS_PATH = "/search/results/people/"
+
+/**
+ * True when `href` IS the page the run expects to be scanning right now.
+ *
+ * The run no longer opens its own window -- it adopts the LinkedIn tab the user
+ * is already on -- so `glint_run` is written into a tab that already has a live
+ * content script sitting on some *other* page. That write fires
+ * storage.onChanged, which would drive the page step immediately, before the
+ * navigation to the search URL has gone anywhere. On the feed that stops the run
+ * with "couldn't find result cards"; on someone else's search results it
+ * silently scores the wrong query's cards.
+ *
+ * So the run's tab drives only the page the run expects. Written against
+ * buildSearchUrl above, which is what "expected" means: same pathname, same
+ * keywords, same title, same page. Compared parameter-wise rather than as
+ * strings because LinkedIn appends its own tracking params on navigation, and a
+ * byte comparison would call the run's own page foreign the moment it lands.
+ */
+export function isRunPage(parsed: ParsedQuery, page: number, href: string): boolean {
+  let url: URL
+  try {
+    url = new URL(href)
+  } catch {
+    return false
+  }
+  if (url.pathname !== SEARCH_RESULTS_PATH) return false
+
+  const expected = new URL(buildSearchUrl(parsed, page))
+  for (const key of ["keywords", "title"] as const) {
+    if (url.searchParams.get(key) !== expected.searchParams.get(key)) return false
+  }
+  // buildSearchUrl omits `page` entirely for page 1, and LinkedIn serves page 1
+  // at both `?page=1` and no page param at all. Absent must therefore equal 1,
+  // or a run resumed onto an explicit `?page=1` URL would never drive.
+  return (url.searchParams.get("page") ?? "1") === (expected.searchParams.get("page") ?? "1")
+}

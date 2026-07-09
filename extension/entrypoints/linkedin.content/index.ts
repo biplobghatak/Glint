@@ -14,7 +14,7 @@ import { getRunState, setRunState, clearRunState, isRunning, type PauseReason, t
 import { sendRuntimeMessage, type RuntimeMessage, type WhichTabMessage, type WhichTabResponse } from "@/lib/messages"
 import { consumeDraft } from "@/lib/draft"
 import { openConnectAndFill, type ConnectOutcome } from "@/lib/connect"
-import { buildSearchUrl } from "@/lib/query"
+import { buildSearchUrl, isRunPage } from "@/lib/query"
 import { nextAction } from "@/lib/agent-step"
 import {
   isContactInfoPath,
@@ -752,14 +752,40 @@ export default defineContentScript({
     }
 
     /**
+     * True when this tab is currently showing the page the run expects.
+     *
+     * A run adopts the LinkedIn tab the user is already on, so glint_run gets
+     * written into a tab whose content script is ALREADY LIVE and sitting on
+     * some other page — the feed, a profile, a different search. That write
+     * reaches this script through storage.onChanged, well before the background
+     * has navigated anywhere. Driving then would scan whatever is on screen: on
+     * the feed that stops the run with "couldn't find result cards", and on
+     * another query's results it would score the wrong people entirely.
+     *
+     * So the run's own tab still waits its turn. The navigation that is coming
+     * reloads this script, and the fresh one finds itself on the run's page.
+     */
+    function onRunPage(state: RunState | undefined | null): boolean {
+      return !!state && isRunPage(state.parsed, state.page, location.href)
+    }
+
+    /**
      * Drives one page step, then stops.
      *
      * Re-entrant by design and guarded by `loopRunning`: a resume re-enters the
      * same page, and `seen` makes that idempotent — every card already scored is
      * skipped, and the walk picks up at the first one that wasn't.
+     *
+     * Both callers set `latestRunState` before calling, so the run-page gate
+     * lives here rather than being repeated (and eventually forgotten) at each
+     * of them.
      */
     async function drive() {
       if (loopRunning || myTabId === null) return
+      // Not our page yet. Return *before* loopRunning is set, so the finally
+      // block below cannot hand this tab back to passive mode — the run still
+      // owns it, and the navigation is still on its way.
+      if (!onRunPage(latestRunState)) return
       loopRunning = true
       try {
         const hud = await ensureHud()

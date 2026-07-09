@@ -1,5 +1,13 @@
 import { isLinkedIn, isPreNavigation } from "@/lib/linkedin"
-import { parseQuery, buildSearchUrl, UnpairedError, NoIcpError, QueryServiceError, NetworkError } from "@/lib/query"
+import {
+  parseQuery,
+  buildSearchUrl,
+  isRunPage,
+  UnpairedError,
+  NoIcpError,
+  QueryServiceError,
+  NetworkError,
+} from "@/lib/query"
 import { getRunState, setRunState, clearRunState, isRunning, type PauseReason, type RunState } from "@/lib/run"
 import { LINKEDIN_MAX_PAGE } from "@/lib/agent-step"
 import { getActiveSiteId, getDeviceToken } from "@/lib/pairing"
@@ -22,6 +30,7 @@ import {
   sendRuntimeMessage,
   type FetchContactInfoMessage,
   type RuntimeMessage,
+  type StartRunMessage,
   type WhichTabResponse,
 } from "@/lib/messages"
 
@@ -47,9 +56,11 @@ const ENRICH_TIMEOUT_MS = 10_000
 const ENRICH_MIN_GAP_MS = 2_000
 const ENRICH_MAX_GAP_MS = 5_000
 
-// The run window. Deliberately not maximized: Chrome reports a window `hidden`
-// only when it is COMPLETELY covered, so a window the user can leave a sliver of
-// keeps its timers, rAF, and IntersectionObserver alive. See RunState.windowId.
+// The FALLBACK run window, for when there is no LinkedIn tab to adopt. A run
+// normally drives the tab the side panel is attached to; see adoptRunTab().
+// Deliberately not maximized: Chrome reports a window `hidden` only when it is
+// COMPLETELY covered, so a window the user can leave a sliver of keeps its
+// timers, rAF, and IntersectionObserver alive. See RunState.windowId.
 const RUN_WINDOW_WIDTH = 900
 const RUN_WINDOW_HEIGHT = 800
 
@@ -125,7 +136,7 @@ function pauseMessage(reason: PauseReason): string {
     case "user":
       return "Paused."
     case "hidden":
-      return "Paused — keep the Glint window visible. Chrome freezes hidden tabs."
+      return "Paused — keep the Glint tab in front. Chrome freezes hidden tabs."
     case "tab_lost":
       return "Paused — the run's tab is gone. Resume to reopen it."
     case "commercial_limit":
@@ -163,17 +174,56 @@ async function openRunWindow(): Promise<{ tabId: number; windowId: number }> {
   return { tabId, windowId: win.id }
 }
 
-async function startRun(query: string, maxPages: number, folderId: string | null) {
+/**
+ * The surface this run will drive: the user's own LinkedIn tab if we were handed
+ * a usable one, otherwise a window of our own.
+ *
+ * Adopting is the normal path. The side panel is only enabled on LinkedIn tabs
+ * (syncPanelForTab), so by the time Start is pressable the user is already
+ * looking at exactly the kind of tab a run needs — opening a second window
+ * beside it was never the only way to satisfy the visibility requirement, just
+ * the first one.
+ *
+ * The panel's `tabId` is a request, not an instruction: it is re-checked here
+ * because the next thing that happens to it is chrome.tabs.update. A tab that
+ * closed between the click and this call, or that is not on LinkedIn, silently
+ * becomes a fresh window rather than an error — the user asked for a run, and a
+ * run is still possible.
+ *
+ * `url` is the tab's current location, so startRun can tell whether a navigation
+ * is needed at all.
+ */
+async function adoptRunTab(
+  requestedTabId: number | null
+): Promise<{ tabId: number; windowId: number | null; url: string | undefined }> {
+  if (requestedTabId !== null) {
+    const tab = await chrome.tabs.get(requestedTabId).catch(() => null)
+    if (tab?.id !== undefined && !tab.discarded && isLinkedIn(tab.url)) {
+      return { tabId: tab.id, windowId: tab.windowId ?? null, url: tab.url }
+    }
+  }
+  const opened = await openRunWindow()
+  return { ...opened, url: "about:blank" }
+}
+
+async function startRun(
+  query: string,
+  maxPages: number,
+  folderId: string | null,
+  requestedTabId: number | null
+) {
   try {
     const parsed = await parseQuery(query)
     // Pinned once. Switching site in the panel mid-run must not retarget the
     // leads this run is still writing.
     const siteId = await getActiveSiteId()
-    const { tabId, windowId } = await openRunWindow()
+    const { tabId, windowId, url } = await adoptRunTab(requestedTabId)
 
     // Persist run state *before* navigating — the future content script reads
     // glint_run on load, so it must already be running by the time the tab
-    // lands on the search results page.
+    // lands on the search results page. On an adopted tab the script is already
+    // live, and this write reaches it via storage.onChanged; isRunPage() is what
+    // stops it driving the page it happens to be on. See lib/query.ts.
     await setRunState({
       status: "running",
       pauseReason: null,
@@ -196,21 +246,27 @@ async function startRun(query: string, maxPages: number, folderId: string | null
       phase: "scanning",
     })
 
-    try {
-      await chrome.tabs.update(tabId, { url: buildSearchUrl(parsed, 1) })
-    } catch (navErr) {
-      // Navigation failed after we already marked the run running — don't
-      // strand glint_run with nothing driving it. Cleanup is wrapped so a
-      // rejection here can't mask the real NavigationError with the generic
-      // fallback message below, re-stranding the run.
+    // Already looking at exactly the results this run wants? Then don't reload
+    // them. The adopted tab's live content script saw the state write, and
+    // isRunPage() has just told us it is allowed to drive — so it already is.
+    // Navigating here would tear down that script mid-scan for nothing.
+    if (!(url && isRunPage(parsed, 1, url))) {
       try {
-        await endRun()
-      } catch (cleanupErr) {
-        console.error("Glint: endRun failed after navigation error", cleanupErr)
+        await chrome.tabs.update(tabId, { url: buildSearchUrl(parsed, 1) })
+      } catch (navErr) {
+        // Navigation failed after we already marked the run running — don't
+        // strand glint_run with nothing driving it. Cleanup is wrapped so a
+        // rejection here can't mask the real NavigationError with the generic
+        // fallback message below, re-stranding the run.
+        try {
+          await endRun()
+        } catch (cleanupErr) {
+          console.error("Glint: endRun failed after navigation error", cleanupErr)
+        }
+        throw new NavigationError(
+          navErr instanceof Error ? navErr.message : "tabs.update failed"
+        )
       }
-      throw new NavigationError(
-        navErr instanceof Error ? navErr.message : "tabs.update failed"
-      )
     }
 
     startWatchdog()
@@ -256,12 +312,21 @@ async function pauseRun(reason: PauseReason): Promise<void> {
 }
 
 /**
- * Resumes a paused run, reopening its window or tab if they are gone.
+ * Resumes a paused run, putting its tab back on the run's page and reopening
+ * the window if it is gone.
  *
- * When the tab is still alive (the `hidden` and `user` pauses), the status flip
- * alone is enough: the content script's own storage.onChanged listener sees the
- * run go back to `running` and re-drives the page step. Re-scanning a partly
- * scanned page is safe and cheap — `seen` makes it idempotent.
+ * When the tab is alive AND still on the run's page (the `hidden` and `user`
+ * pauses), the status flip alone is enough: the content script's own
+ * storage.onChanged listener sees the run go back to `running` and re-drives the
+ * page step. Re-scanning a partly scanned page is safe and cheap — `seen` makes
+ * it idempotent.
+ *
+ * A run now drives the user's own tab, though, so a pause is exactly when the
+ * user is most likely to go and read one of the leads. The tab comes back
+ * pointing at a profile, still on LinkedIn, still perfectly alive — and the
+ * content script's isRunPage() gate will (rightly) refuse to drive it. Flipping
+ * the status without navigating would leave the run `running` with nothing
+ * driving it, which is the one state this whole file exists to prevent.
  */
 async function resumeRun(): Promise<void> {
   const state = await getRunState()
@@ -295,6 +360,19 @@ async function resumeRun(): Promise<void> {
 
   await setRunState({ ...state, status: "running", pauseReason: null })
   startWatchdog()
+
+  // The tab is alive and on LinkedIn, but wandered off the run's page while it
+  // was paused. Send it back. Ordering matches startRun's: the state is already
+  // `running`, so the content script that loads on arrival finds a run to drive.
+  // A failure here is recoverable — the run stays paused-able and Resume retries.
+  if (!isRunPage(state.parsed, state.page, tab.url ?? "")) {
+    try {
+      await chrome.tabs.update(state.tabId, { url })
+    } catch (err) {
+      console.error("Glint: resumeRun could not return the tab to the run's page", err)
+      await pauseRun("tab_lost")
+    }
+  }
 }
 
 /**
@@ -768,11 +846,7 @@ async function sweepContactInfoOrphans(): Promise<void> {
 // second window's side panel is an independently mounted document that has no
 // idea another one already has a run. glint_run is the only shared source of
 // truth, so it's checked here before we ever call startRun.
-async function handleStartRunMessage(
-  query: string,
-  maxPages: number,
-  folderId: string | null
-) {
+async function handleStartRunMessage(message: StartRunMessage) {
   const state = await getRunState()
   if (state) {
     sendMessage({
@@ -784,7 +858,7 @@ async function handleStartRunMessage(
     })
     return
   }
-  await startRun(query, maxPages, folderId)
+  await startRun(message.query, message.maxPages, message.folderId, message.tabId)
 }
 
 export default defineBackground(() => {
@@ -840,7 +914,7 @@ export default defineBackground(() => {
 
     chrome.runtime.onMessage.addListener((message: RuntimeMessage, sender, sendResponse) => {
       if (message.type === "START_RUN") {
-        void handleStartRunMessage(message.query, message.maxPages, message.folderId)
+        void handleStartRunMessage(message)
       } else if (message.type === "STOP_RUN") {
         void endRun("Stopped")
       } else if (message.type === "PAUSE_RUN") {
