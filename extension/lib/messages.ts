@@ -77,6 +77,16 @@ export type ContactInfoMessage = {
   email: string | null
   phone: string | null
 }
+// Sent by the background to ANY LinkedIn content script, asking it to fetch a
+// contact-info overlay same-origin and parse it. The content script is the only
+// place this can happen: DOMParser does not exist in an MV3 service worker, and
+// a same-origin fetch carries the session cookie without Glint ever touching a
+// credential. Answers with ContactInfoResult; `readable: false` sends the
+// background back to the slower, visible, tab-based lookup.
+export type FetchContactInfoMessage = {
+  type: "FETCH_CONTACT_INFO"
+  url: string
+}
 
 export type RuntimeMessage =
   | StartRunMessage
@@ -94,6 +104,7 @@ export type RuntimeMessage =
   | EnrichProgressMessage
   | EnrichStoppedMessage
   | ContactInfoMessage
+  | FetchContactInfoMessage
 
 // Response payload for WhichTabMessage, delivered via sendResponse(). Kept
 // out of the RuntimeMessage union since it's never itself dispatched through

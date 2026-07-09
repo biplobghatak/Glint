@@ -17,8 +17,13 @@ import {
   setEnrichBudget,
   setEnrichPass,
 } from "@/lib/enrich-store"
-import { CONTACT_INFO_PATH } from "@/lib/contact"
-import { sendRuntimeMessage, type RuntimeMessage, type WhichTabResponse } from "@/lib/messages"
+import { CONTACT_INFO_PATH, isContactInfoPath, type ContactInfoResult } from "@/lib/contact"
+import {
+  sendRuntimeMessage,
+  type FetchContactInfoMessage,
+  type RuntimeMessage,
+  type WhichTabResponse,
+} from "@/lib/messages"
 
 // Depth, not breadth: LinkedIn returns at most 1,000 people per search, across
 // 100 pages of 10. A run now goes as far as the query itself allows.
@@ -500,13 +505,58 @@ async function removeOpenedTabId(tabId: number): Promise<void> {
 }
 
 /**
+ * Any open LinkedIn tab, which can serve a same-origin contact-info fetch.
+ *
+ * Not the run's tab specifically: a pass is independent of a run, and any
+ * linkedin.com content script will do. Skips contact-info overlay tabs — those
+ * return early in main() and never register the listener.
+ */
+async function findLinkedInTabId(): Promise<number | null> {
+  const tabs = await chrome.tabs.query({ url: "*://*.linkedin.com/*" }).catch(() => [])
+  for (const tab of tabs) {
+    if (tab.id === undefined || !tab.url) continue
+    if (isContactInfoPath(new URL(tab.url).pathname)) continue
+    return tab.id
+  }
+  return null
+}
+
+/**
+ * Reads a lead's contact info by fetching the overlay from an existing LinkedIn
+ * tab, with no new tab and nothing on screen.
+ *
+ * Returns null when no tab could answer, or when the tab reports it could not
+ * actually read the overlay (a login wall, a 302, a page whose contact section
+ * is client-rendered). Null means "fall back", never "no contact info" — the
+ * difference between those two is the whole reason ContactInfoResult carries a
+ * `readable` flag.
+ */
+async function fetchContactInfoViaTab(url: string): Promise<ContactInfoResult | null> {
+  const tabId = await findLinkedInTabId()
+  if (tabId === null) return null
+  try {
+    const res = (await chrome.tabs.sendMessage(tabId, {
+      type: "FETCH_CONTACT_INFO",
+      url,
+    } satisfies FetchContactInfoMessage)) as ContactInfoResult | undefined
+    return res?.readable ? res : null
+  } catch (err) {
+    // Tab closed or navigated between the query and the send.
+    console.debug("Glint: contact-info fetch message failed", err)
+    return null
+  }
+}
+
+/**
  * Visits one lead's contact-info overlay in a background tab, extracts what it
  * finds, writes it, and closes the tab. Resolves when the tab is gone.
  *
- * Serial by construction — the pass loop awaits this before starting the next.
- * Ten simultaneous profile loads is a browsing pattern no human produces.
+ * The slow path. Only reached when the silent fetch above could not read the
+ * overlay. Serial by construction — the pass loop awaits this before starting
+ * the next. Ten simultaneous profile loads is a browsing pattern no human
+ * produces.
  */
-async function lookupContactInfo(leadId: string, url: string): Promise<void> {
+async function lookupContactInfoViaTab(leadId: string, url: string): Promise<void> {
   let tab: chrome.tabs.Tab
   try {
     tab = await chrome.tabs.create({ url, active: false })
@@ -542,6 +592,23 @@ async function lookupContactInfo(leadId: string, url: string): Promise<void> {
     pendingEnrich.set(contactTabId, { finish })
     void addOpenedTabId(contactTabId)
   })
+}
+
+/**
+ * One lead's contact info: silently if we can, visibly if we must.
+ *
+ * The fetch path opens nothing and shows nothing. It is unverified against a
+ * live authenticated session, though, so a failure to READ the overlay (as
+ * opposed to reading it and finding nothing) drops through to the tab path
+ * rather than recording a lead as having no contact info.
+ */
+async function lookupContactInfo(leadId: string, url: string): Promise<void> {
+  const fetched = await fetchContactInfoViaTab(url)
+  if (fetched) {
+    await enrichLead(leadId, fetched.email, fetched.phone)
+    return
+  }
+  await lookupContactInfoViaTab(leadId, url)
 }
 
 /** Aborts every in-flight lookup and closes every tab the pass opened. */

@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest"
-import { CONTACT_INFO_PATH, extractContactInfo, isContactInfoPath } from "./contact"
+import {
+  CONTACT_INFO_PATH,
+  extractContactInfo,
+  isContactInfoPath,
+  parseContactInfoHtml,
+} from "./contact"
 
 function root(html: string): ParentNode {
   const el = document.createElement("div")
@@ -61,5 +66,39 @@ describe("extractContactInfo", () => {
 
   it("never throws on hostile markup", () => {
     expect(() => extractContactInfo(root(`<a href>`))).not.toThrow()
+  })
+})
+
+describe("parseContactInfoHtml", () => {
+  it("reads an email out of a mailto anchor", () => {
+    const r = parseContactInfoHtml(
+      `<h2>Contact info</h2><a href="mailto:jane@acme.com">jane@acme.com</a>`
+    )
+    expect(r).toEqual({ readable: true, email: "jane@acme.com", phone: null })
+  })
+
+  // The whole reason `readable` exists. Both of the next two cases extract
+  // {email: null, phone: null}; only the first of them means "this member
+  // publishes no contact info". Recording the second as such would permanently
+  // stamp enriched_at on a lead nobody actually looked at.
+  it("is readable when the overlay rendered but held nothing", () => {
+    const r = parseContactInfoHtml(`<h2>Contact info</h2><section><ul></ul></section>`)
+    expect(r).toEqual({ readable: true, email: null, phone: null })
+  })
+
+  it("is NOT readable when the overlay never rendered (login wall)", () => {
+    const r = parseContactInfoHtml(`<h1>Sign in</h1><form id="login"></form>`)
+    expect(r.readable).toBe(false)
+    expect(r.email).toBeNull()
+  })
+
+  it("is not readable for empty or junk input", () => {
+    expect(parseContactInfoHtml("").readable).toBe(false)
+    expect(parseContactInfoHtml("<p>302</p>").readable).toBe(false)
+  })
+
+  it("still reads a phone when only a tel anchor is present", () => {
+    const r = parseContactInfoHtml(`<a href="tel:+1 415 555 0100">call</a>`)
+    expect(r).toEqual({ readable: true, email: null, phone: "+1 415 555 0100" })
   })
 })

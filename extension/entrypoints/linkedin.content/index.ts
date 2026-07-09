@@ -16,7 +16,12 @@ import { consumeDraft } from "@/lib/draft"
 import { openConnectAndFill } from "@/lib/connect"
 import { buildSearchUrl } from "@/lib/query"
 import { nextAction } from "@/lib/agent-step"
-import { isContactInfoPath, extractContactInfo } from "@/lib/contact"
+import {
+  isContactInfoPath,
+  extractContactInfo,
+  parseContactInfoHtml,
+  type ContactInfoResult,
+} from "@/lib/contact"
 import { renderHud, HUD_TAG, type HudHandle } from "@/lib/hud"
 import { formatScore } from "@/lib/format"
 import { renderDraftCard } from "./draft-card"
@@ -169,6 +174,34 @@ async function reportContactInfo(): Promise<void> {
     await new Promise((r) => setTimeout(r, 200))
   }
   sendRuntimeMessage({ type: "CONTACT_INFO", email: null, phone: null })
+}
+
+/**
+ * Fetches a contact-info overlay and parses it, without opening a tab.
+ *
+ * Runs here, in the page's own origin, for two reasons that both matter: the
+ * fetch is same-origin so LinkedIn's session cookie is attached by the browser
+ * (Glint never reads, stores, or forwards a credential), and DOMParser exists,
+ * which it does not in the service worker.
+ *
+ * Fail-soft, and specifically fail-*honest*: anything that isn't a 200 landing
+ * on the overlay path answers `readable: false`, which sends the background back
+ * to the tab-based lookup rather than recording "no public contact info" for a
+ * lead whose page we never actually saw.
+ */
+async function fetchContactInfo(url: string): Promise<ContactInfoResult> {
+  const miss: ContactInfoResult = { readable: false, email: null, phone: null }
+  try {
+    const res = await fetch(url, { credentials: "include", redirect: "follow" })
+    if (!res.ok) return miss
+    // A 302 to the profile, or to the auth wall, follows into a 200. The final
+    // URL is the only way to notice we were sent somewhere else.
+    if (!isContactInfoPath(new URL(res.url).pathname)) return miss
+    return parseContactInfoHtml(await res.text())
+  } catch (err) {
+    console.debug("Glint: contact-info fetch failed", url, err)
+    return miss
+  }
 }
 
 const SCROLL_SETTLE_MS = 350
@@ -517,6 +550,18 @@ export default defineContentScript({
       void reportContactInfo()
       return
     }
+
+    // Any ordinary LinkedIn page can serve a contact-info fetch for the
+    // background's enrichment pass. Registered before the run machinery because
+    // it is entirely independent of one: a pass can run with no run in sight.
+    chrome.runtime.onMessage.addListener((message: RuntimeMessage, _sender, sendResponse) => {
+      if (message.type !== "FETCH_CONTACT_INFO") return
+      // Async, so hold the channel open. Return true ONLY here — doing it
+      // unconditionally would hold the port for every message this listener
+      // ignores, none of which ever call sendResponse.
+      fetchContactInfo(message.url).then(sendResponse)
+      return true
+    })
 
     // Independent of the scan/agent machinery below: a profile page has no
     // result cards, and a search page has no pending draft.

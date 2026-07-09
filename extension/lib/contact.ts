@@ -69,3 +69,46 @@ export function extractContactInfo(root: ParentNode): {
     return { email: null, phone: null }
   }
 }
+
+export type ContactInfoResult = {
+  /**
+   * Whether the overlay was actually read. The whole point of this flag.
+   *
+   * `{email: null, phone: null}` is ambiguous: it is the correct answer for an
+   * out-of-network member who publishes neither, AND what you get from a login
+   * wall, a 302 to the profile, or a page whose contact section is rendered by
+   * JavaScript the fetch never ran. Stamping enriched_at on the second case
+   * would permanently record "no public contact info" for a lead nobody looked
+   * at. So: `readable: false` means "ask again, properly", never "found none".
+   */
+  readable: boolean
+  email: string | null
+  phone: string | null
+}
+
+/**
+ * Parse a contact-info overlay fetched as HTML, without opening a tab.
+ *
+ * DOMParser is unavailable in an MV3 service worker, so this necessarily runs in
+ * a content script (which also makes the fetch same-origin, so the session
+ * cookie rides along without any credential handling of our own).
+ *
+ * Readability is inferred, because LinkedIn will not tell us: any mailto/tel we
+ * can see proves we read the overlay; failing that, a "Contact info" heading
+ * proves the overlay rendered and simply held nothing.
+ */
+export function parseContactInfoHtml(html: string): ContactInfoResult {
+  try {
+    const doc = new DOMParser().parseFromString(html, "text/html")
+    const info = extractContactInfo(doc)
+    if (info.email || info.phone) return { readable: true, ...info }
+
+    const headings = Array.from(
+      doc.querySelectorAll("h1, h2, h3, [class*='contact-info']")
+    )
+    const rendered = headings.some((el) => /contact\s*info/i.test(el.textContent ?? ""))
+    return { readable: rendered, ...info }
+  } catch {
+    return { readable: false, email: null, phone: null }
+  }
+}
