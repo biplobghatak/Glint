@@ -1,5 +1,6 @@
 import { createClient } from "jsr:@supabase/supabase-js@2"
 import { callLLMJson } from "../_shared/llm.ts"
+import { MAX_OPENER_CHARS, validateOpener } from "./validate.ts"
 
 // Drafts a short outreach opener for one lead, from the user's ICP and the
 // lead's stored match_reasons. Device-token authenticated; resolves user_id
@@ -28,7 +29,6 @@ const corsHeaders = {
 // not a person composing outreach.
 const RATE_LIMIT_MS = 5_000
 const LLM_TIMEOUT_MS = 20_000
-const MAX_OPENER_CHARS = 400
 
 // OpenRouter runs strict json_schema with additionalProperties:false, which
 // requires EVERY property to appear in `required`. Optionality is expressed as
@@ -39,7 +39,7 @@ const DRAFT_SCHEMA = {
     opener: {
       type: "string",
       description:
-        "A LinkedIn outreach opener, at most 400 characters. No greeting placeholder like [Name] or {{first_name}}. References one concrete match reason. No sign-off.",
+        `A LinkedIn outreach opener, at most ${MAX_OPENER_CHARS} characters. No greeting placeholder like [Name] or {{first_name}}. References one concrete match reason. No sign-off. No em dashes or en dashes. Must end with a call to action.`,
     },
   },
   required: ["opener"],
@@ -88,11 +88,30 @@ function draftPrompt(icp: Icp, lead: Lead): string {
     "",
     "Rules:",
     `- At most ${MAX_OPENER_CHARS} characters.`,
+    "- No em dashes (—) or en dashes (–). Use a period or comma instead.",
+    "- End with a call to action: either a question, or an imperative like 'Let me know if you're open to a chat.'",
     "- Reference one concrete, specific reason this person is relevant.",
     "- No greeting placeholder tokens. Address them by name directly, or not at all.",
     "- No sign-off, no signature, no 'Best regards'.",
     "- Plain, direct, and human. No marketing adjectives. Do not claim you read something you did not.",
   ].join("\n")
+}
+
+// Turns a validator rejection reason into a sentence the model can act on.
+// Named so the retry prompt can say exactly what was wrong, not just "invalid".
+function violationDescription(reason: string): string {
+  switch (reason) {
+    case "too_long":
+      return `it was over ${MAX_OPENER_CHARS} characters`
+    case "dash":
+      return "it used an em dash or en dash"
+    case "no_cta":
+      return "it did not end with a call to action"
+    case "empty":
+      return "it was empty"
+    default:
+      return "it did not meet the required format"
+  }
 }
 
 Deno.serve(async (req: Request) => {
@@ -194,13 +213,12 @@ Deno.serve(async (req: Request) => {
     .update({ last_draft_at: new Date().toISOString() })
     .eq("device_token", device_token)
 
-  let draft: Draft
-  try {
-    // callLLMJson has no timeout of its own, and an unresolved fetch here means
-    // a button that spins forever. Race it.
-    draft = await Promise.race([
+  // callLLMJson has no timeout of its own, and an unresolved fetch here means a
+  // button that spins forever. Race each attempt individually.
+  async function requestOpener(prompt: string): Promise<string> {
+    const draft = await Promise.race([
       callLLMJson<Draft>({
-        messages: [{ role: "user", content: draftPrompt(icp as Icp, lead as Lead) }],
+        messages: [{ role: "user", content: prompt }],
         schema: DRAFT_SCHEMA,
         schemaName: "draft_opener",
         maxTokens: 512,
@@ -211,6 +229,14 @@ Deno.serve(async (req: Request) => {
         setTimeout(() => reject(new Error("llm_timeout")), LLM_TIMEOUT_MS)
       ),
     ])
+    return (draft.opener ?? "").trim()
+  }
+
+  const basePrompt = draftPrompt(icp as Icp, lead as Lead)
+
+  let opener: string
+  try {
+    opener = await requestOpener(basePrompt)
   } catch (err) {
     // 502, deliberately, not 500. It tells the panel "the model failed, use
     // your fallback" — show the lead's match_reasons verbatim. The user still
@@ -222,20 +248,41 @@ Deno.serve(async (req: Request) => {
     })
   }
 
-  const opener = (draft.opener ?? "").trim()
-  if (!opener) {
-    return new Response(JSON.stringify({ error: "llm_unavailable" }), {
-      status: 502,
-      headers: jsonHeaders,
-    })
+  // The contract (<=200 chars, no em/en dash, ends with a call to action) is
+  // enforced HERE, on the response, not just requested in the prompt. A model
+  // told not to use an em dash will use one eventually. On failure, retry once
+  // naming the specific violation; if the retry also fails, never ship an
+  // invalid opener — fall back to 502 like any other LLM failure.
+  let result = validateOpener(opener)
+  if (!result.ok) {
+    console.warn("Glint: draft-opener rejected draft", { reason: result.reason, text: opener })
+
+    const retryPrompt = [
+      basePrompt,
+      "",
+      `Your previous draft was rejected because ${violationDescription(result.reason)}: "${opener}"`,
+      "Rewrite it so it satisfies every rule above.",
+    ].join("\n")
+
+    try {
+      opener = await requestOpener(retryPrompt)
+    } catch (err) {
+      console.error("Glint: draft-opener retry LLM call failed", err)
+      return new Response(JSON.stringify({ error: "llm_unavailable" }), {
+        status: 502,
+        headers: jsonHeaders,
+      })
+    }
+
+    result = validateOpener(opener)
+    if (!result.ok) {
+      console.warn("Glint: draft-opener rejected retry draft", { reason: result.reason, text: opener })
+      return new Response(JSON.stringify({ error: "llm_unavailable" }), {
+        status: 502,
+        headers: jsonHeaders,
+      })
+    }
   }
 
-  // The model is asked for <=400 chars and usually obeys. Truncating on a word
-  // boundary is better than pasting a sentence that stops mid-word.
-  const capped =
-    opener.length <= MAX_OPENER_CHARS
-      ? opener
-      : opener.slice(0, opener.lastIndexOf(" ", MAX_OPENER_CHARS)) + "…"
-
-  return new Response(JSON.stringify({ opener: capped }), { headers: jsonHeaders })
+  return new Response(JSON.stringify({ opener }), { headers: jsonHeaders })
 })
