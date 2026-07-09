@@ -192,10 +192,38 @@ function cleanExtractedName(raw: string): string {
   return s
 }
 
+/**
+ * Whether a cleaned string can plausibly be a person's name.
+ *
+ * The structural name fallback reads a profile anchor's text, which is right on
+ * a search-result card and catastrophically wrong on a profile page, where the
+ * anchor wraps the entire top card: name, headline, location, follower count.
+ * That produced stored leads called "Ritu David Ritu David Clarity Catalyst for
+ * Global Leaders & Brands | Founder, The Data DuckMumbai, Maharashtra,
+ * India17K followersView my services" — and every surface downstream (badge,
+ * lead row, draft-opener prompt) faithfully repeated it.
+ *
+ * Rejecting is the right failure: extractFromNode returns null without a name,
+ * so the card is discarded rather than stored as garbage. A real name that this
+ * happens to reject costs one lead. A blob that it lets through poisons the row,
+ * the LLM prompt that reads it, and the outreach note.
+ */
+export function looksLikePersonName(s: string): boolean {
+  if (!s || s.length > 60) return false
+  if (/[\n\r|•·]/.test(s)) return false
+  // Headline/profile furniture that never appears inside a name.
+  if (/\b(followers?|connections?|view\s+my|1st|2nd|3rd)\b/i.test(s)) return false
+  // "Jane Doe" is two words; "Maria del Carmen van der Berg" is six. A profile
+  // top-card blob is dozens.
+  if (s.split(/\s+/).length > 6) return false
+  return true
+}
+
 // Structural fallback for the name: the profile anchor's aria-hidden span
 // (preferred, since LinkedIn duplicates the name in an sr-only span for
 // accessibility) or the anchor's own text. Avatar-only anchors have no text
-// and are skipped in favor of the name anchor.
+// and are skipped in favor of the name anchor. An anchor whose text is a whole
+// card rather than a name is skipped too — see looksLikePersonName.
 function extractNameFromCard(node: Element): string | null {
   const anchors = Array.from(
     node.querySelectorAll<HTMLAnchorElement>('a[href*="/in/"]')
@@ -204,7 +232,7 @@ function extractNameFromCard(node: Element): string | null {
     const raw = text(a.querySelector('span[aria-hidden="true"]')) ?? text(a)
     if (!raw) continue
     const cleaned = cleanExtractedName(raw)
-    if (cleaned) return cleaned
+    if (cleaned && looksLikePersonName(cleaned)) return cleaned
   }
   return null
 }
@@ -368,6 +396,9 @@ export function extractFromNode(node: Element): LeadCandidate | null {
         ) ?? node.querySelector(".entity-result__title-text a")
       )
       if (name) name = cleanExtractedName(name)
+      // A rotted class name can match a wrapper whose text is the whole card.
+      // Trust the shape of the value, not the name of the selector that found it.
+      if (name && !looksLikePersonName(name)) name = null
       if (!name) name = extractNameFromCard(node)
 
       let headline = text(node.querySelector(".entity-result__primary-subtitle"))

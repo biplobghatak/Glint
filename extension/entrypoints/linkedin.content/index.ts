@@ -13,7 +13,7 @@ import {
 import { getRunState, setRunState, clearRunState, isRunning, type PauseReason, type RunState } from "@/lib/run"
 import { sendRuntimeMessage, type RuntimeMessage, type WhichTabMessage, type WhichTabResponse } from "@/lib/messages"
 import { consumeDraft } from "@/lib/draft"
-import { openConnectAndFill } from "@/lib/connect"
+import { openConnectAndFill, type ConnectOutcome } from "@/lib/connect"
 import { buildSearchUrl } from "@/lib/query"
 import { nextAction } from "@/lib/agent-step"
 import {
@@ -40,6 +40,11 @@ function randomDelay(minMs: number, maxMs: number): Promise<void> {
 
 function hasCommercialLimitBanner(): boolean {
   return /commercial use limit/i.test(document.body.innerText)
+}
+
+/** Read live, not cached: LinkedIn is an SPA and this changes without a reload. */
+function isSearchResultsPage(): boolean {
+  return location.pathname.startsWith("/search/results/")
 }
 
 // Badges are Glint's own nodes, injected into LinkedIn's DOM. The
@@ -497,9 +502,9 @@ async function mountDraftCard(ctx: ContentScriptContext): Promise<void> {
   // waitFor resolves rather than rejects, but wrap it anyway so a surprise
   // can't take the profile page down. openConnectAndFill contains no Send/submit
   // click and never will: the human presses LinkedIn's own Send.
-  let prefilled = false
+  let outcome: ConnectOutcome = "no_button"
   try {
-    prefilled = (await openConnectAndFill(draft.opener)) === "filled"
+    outcome = await openConnectAndFill(draft.opener)
   } catch (err) {
     console.debug("Glint: openConnectAndFill threw", err)
   }
@@ -509,7 +514,7 @@ async function mountDraftCard(ctx: ContentScriptContext): Promise<void> {
     position: "overlay",
     anchor: "body",
     onMount: (container) =>
-      renderDraftCard(container, draft, prefilled, () => ui.remove()),
+      renderDraftCard(container, draft, outcome, () => ui.remove()),
     // renderDraftCard returns its own teardown (the fallback path polls for
     // LinkedIn's composer); dropping it here would leak an interval per
     // dismissed card.
@@ -651,9 +656,14 @@ export default defineContentScript({
 
     function scan(root: ParentNode) {
       if (agentActive) return
+      // findSearchResultCards is named for where it works. Run it on a profile
+      // page and its structural discovery climbs from the member's own anchor to
+      // the entire top card, whose text is a name, a headline, a location and a
+      // follower count — which then gets stored as the lead's `name`. Feed posts
+      // have their own extractor and are safe anywhere.
       const candidates: Element[] = [
         ...Array.from(root.querySelectorAll(FEED_POST_SELECTOR)),
-        ...findSearchResultCards(root),
+        ...(isSearchResultsPage() ? findSearchResultCards(root) : []),
       ]
       candidates.forEach((node) => {
         const cand = extractFromNode(node)

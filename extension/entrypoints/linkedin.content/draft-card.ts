@@ -1,4 +1,34 @@
+import type { ConnectOutcome } from "@/lib/connect"
 import type { StoredDraft } from "@/lib/draft"
+
+/**
+ * A heading-safe rendering of a lead's stored name.
+ *
+ * Names are extracted from LinkedIn's DOM and guarded at extraction, but rows
+ * stored before that guard existed can hold a whole profile top-card — headline,
+ * location, follower count and all. The card must not render a paragraph where a
+ * name belongs, and CSS clamping alone would still hand the whole blob to a
+ * screen reader.
+ */
+export function displayName(raw: string): string {
+  const first = raw.split(/[\n|•]/)[0]?.trim() ?? ""
+  const name = first.length > 0 ? first : raw.trim()
+  return name.length > 40 ? `${name.slice(0, 39).trimEnd()}…` : name
+}
+
+/** What to tell the user when the note could not be prefilled. */
+function fallbackReason(outcome: ConnectOutcome): string {
+  switch (outcome) {
+    case "no_button":
+      return "No Connect button on this profile — you may already be connected, or an invite is pending. Copy the note instead."
+    case "no_note_option":
+      return "LinkedIn didn't offer a note field. Free accounts get a limited number of noted invites each month. Copy the note instead."
+    case "no_textarea":
+      return "Couldn't open LinkedIn's connect dialog — copy the note instead."
+    case "filled":
+      return ""
+  }
+}
 
 // Deliberately plain DOM, not React. This module is bundled into the content
 // script, which runs on EVERY linkedin.com page load. Pulling React in for one
@@ -77,21 +107,23 @@ function el<K extends keyof HTMLElementTagNameMap>(
 export function renderDraftCard(
   container: HTMLElement,
   draft: StoredDraft,
-  prefilled: boolean,
+  outcome: ConnectOutcome,
   onClose: () => void
 ): () => void {
+  const prefilled = outcome === "filled"
   const card = el("div", "card")
   card.setAttribute("role", "dialog")
   card.setAttribute("aria-label", "Glint draft opener")
 
   const head = el("div", "head")
-  head.append(
-    el(
-      "span",
-      "title",
-      draft.isFallback ? "Why they matched" : `Draft for ${draft.leadName}`
-    )
+  const title = el(
+    "span",
+    "title",
+    draft.isFallback ? "Why they matched" : `Draft for ${displayName(draft.leadName)}`
   )
+  // The full value stays reachable on hover even when the heading clamps it.
+  title.title = draft.leadName
+  head.append(title)
   const close = el("button", "close", "✕")
   close.type = "button"
   close.setAttribute("aria-label", "Dismiss")
@@ -159,13 +191,7 @@ export function renderDraftCard(
   actions.append(insert)
   card.append(actions)
 
-  card.append(
-    el(
-      "p",
-      "fallback-note",
-      "Couldn't open LinkedIn's connect dialog — copy the note instead."
-    )
-  )
+  card.append(el("p", "fallback-note", fallbackReason(outcome)))
 
   // Insert stays disabled until LinkedIn's composer is actually open. Glint
   // never opens it, and never sends — the user reviews the text and presses

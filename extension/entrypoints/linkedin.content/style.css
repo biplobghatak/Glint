@@ -21,7 +21,13 @@
   --glint-primary-fg: oklch(0.982 0.018 155.826);
 
   all: initial;
-  font: 400 13px/1.5 system-ui, -apple-system, sans-serif;
+  /* Inter renders only where it is installed — no webfont is bundled, and a
+     shadow root cannot borrow LinkedIn's. The rest of the stack is what most
+     machines actually paint. */
+  --glint-font: "Inter", "Inter Variable", system-ui, -apple-system, "Segoe UI",
+    Roboto, sans-serif;
+  font: 400 14px/1.55 var(--glint-font);
+  -webkit-font-smoothing: antialiased;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -41,60 +47,70 @@
   /* Above LinkedIn's message overlay and nav. Our own shadow root, so this
      competes with nothing else of ours. */
   z-index: 2147483000;
-  width: 320px;
+  width: 380px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 14px;
+  gap: 14px;
+  padding: 18px;
   color: var(--glint-fg);
   background: var(--glint-bg);
   border: 1px solid var(--glint-border);
-  border-radius: 10px;
-  box-shadow: 0 8px 24px rgb(0 0 0 / 12%);
+  border-radius: 12px;
+  box-shadow: 0 10px 32px rgb(0 0 0 / 16%);
 }
 
 .head {
   display: flex;
-  align-items: baseline;
+  align-items: flex-start;
   justify-content: space-between;
-  gap: 8px;
+  gap: 10px;
 }
 
 .title {
-  font-size: 12px;
+  /* One line. displayName() already trims the value; this is the visual
+     backstop for a name that is merely long rather than malformed. */
+  font-size: 15px;
   font-weight: 600;
+  line-height: 1.3;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .hint,
 .fallback-note {
   color: var(--glint-muted);
-  font-size: 11px;
+  font-size: 12.5px;
+  line-height: 1.5;
 }
 
 .draft {
-  max-height: 220px;
+  max-height: 260px;
   overflow-y: auto;
-  padding: 8px 10px;
-  font-size: 13px;
+  padding: 12px 14px;
+  /* The one thing on the card the user is here to read. */
+  font-size: 14.5px;
+  line-height: 1.6;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   background: color-mix(in oklch, var(--glint-fg) 4%, transparent);
   border: 1px solid var(--glint-border);
-  border-radius: 6px;
+  border-radius: 8px;
 }
 
 .actions {
   display: flex;
-  gap: 8px;
+  gap: 10px;
 }
 
 button {
   flex: 1;
-  padding: 7px 10px;
-  font: inherit;
-  font-size: 12px;
-  font-weight: 500;
-  border-radius: 6px;
+  padding: 9px 12px;
+  font-family: var(--glint-font);
+  font-size: 13.5px;
+  font-weight: 600;
+  border-radius: 8px;
   cursor: pointer;
 }
 
@@ -126,7 +142,12 @@ button:disabled {
   color: var(--glint-muted);
   background: none;
   border: 0;
-  font-size: 14px;
+  font-size: 16px;
+  line-height: 1.3;
+}
+
+.close:hover {
+  color: var(--glint-fg);
 }
 
 /* Run HUD. Mounted by createShadowRootUi(), so these selectors resolve inside
@@ -143,7 +164,7 @@ button:disabled {
   border-radius: 10px;
   box-shadow: 0 8px 24px rgb(0 0 0 / 14%);
   padding: 12px;
-  font: 400 12px/1.4 system-ui, -apple-system, sans-serif;
+  font: 400 12px/1.4 var(--glint-font);
 }
 .glint-hud-top { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
 .glint-hud-dot { width: 6px; height: 6px; border-radius: 50%; background: #15803d; }
@@ -164,7 +185,7 @@ button:disabled {
   background: #fff;
   color: #404040;
   border-radius: 6px;
-  font: 600 10px system-ui;
+  font: 600 10px var(--glint-font);
   padding: 5px 0;
   cursor: pointer;
 }
