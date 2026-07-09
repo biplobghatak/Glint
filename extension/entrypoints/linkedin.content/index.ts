@@ -2,7 +2,14 @@ import { browser } from "wxt/browser"
 import type { ContentScriptContext } from "wxt/utils/content-script-context"
 import { createShadowRootUi } from "wxt/utils/content-script-ui/shadow-root"
 import { extractFromNode, findSearchResultCards, type LeadCandidate } from "@/lib/extract"
-import { scoreLead, InvalidFolderError } from "@/lib/score"
+import {
+  scoreLead,
+  scoreLeads,
+  pairResultsToCards,
+  InvalidFolderError,
+  type BatchScore,
+  type ScoreResult,
+} from "@/lib/score"
 import { getRunState, setRunState, clearRunState, type RunState } from "@/lib/run"
 import { sendRuntimeMessage, type RuntimeMessage, type WhichTabMessage, type WhichTabResponse, type EnrichMessage, type EnrichResponse } from "@/lib/messages"
 import { consumeDraft } from "@/lib/draft"
@@ -164,6 +171,13 @@ function settle(): Promise<void> {
   return new Promise((r) => setTimeout(r, SCROLL_SETTLE_MS))
 }
 
+// The page is scored in one request BEFORE the reveal begins, so the per-card
+// dwell no longer waits on the network — only on the smooth scroll landing
+// (SCROLL_SETTLE_MS) plus this short human-paced pause. It can therefore be far
+// tighter than the old 400–900ms, which had to also mask a 1–3s round-trip.
+const REVEAL_MIN_MS = 220
+const REVEAL_MAX_MS = 480
+
 const SCANNING_CLASS = "glint-scanning"
 
 // Tracks whether findSearchResultCards() has EVER matched a single card during
@@ -217,38 +231,35 @@ async function runPageStep(myTabId: number, hud: HudHandle) {
   const cards = findSearchResultCards(document)
   console.debug("Glint: page", initial.page, "cards found:", cards.length)
 
+  // --- Phase 1: Collect. No scrolling, no network. Extract every card, drop the
+  // ones already seen, and build the pending list the batch will be scored from.
+  const pending: { node: Element; cand: LeadCandidate }[] = []
   for (const node of cards) {
-    // Re-read fresh before every card. The inner loop runs for many seconds
-    // (a scoreLead round-trip plus pacing per card), so Stop and the caps
-    // must interrupt mid-page, not only between pages.
-    const before = await getRunState()
-    if (!before || !before.active || before.tabId !== myTabId) return
-    const decision = nextAction(before, Date.now())
-    if (decision.kind === "stop") {
-      await stopRun(decision.reason)
-      return
-    }
-
     const cand = extractFromNode(node)
     if (!cand) continue
+    // everFoundCard tracks whether ANY card extracted this page, even a seen one,
+    // so a fully-seen page is not mistaken for stale selectors below.
     everFoundCard = true
-
     const key = cand.linkedin_url ?? `${cand.name ?? ""}|${cand.company ?? ""}`
     if (seen.has(key)) continue
+    pending.push({ node, cand })
+  }
 
-    // The animation. This is the whole reason a person can tell the extension
-    // is running: previously the only scroll in this file fired once, at the
-    // end of a page, after every card had already been scored.
-    node.scrollIntoView({ behavior: "smooth", block: "center" })
-    node.classList.add(SCANNING_CLASS)
-    await settle()
-    hud.update({ status: `Scoring ${cand.name ?? "a lead"}…` })
+  // --- Phase 2: Score. ONE request for the whole page. On success each card
+  // carries its pre-fetched result, paired by input position with its echoed
+  // linkedin_url asserted (pairResultsToCards) so a reordered response can never
+  // badge the wrong person. On failure (null) the plan falls back to per-card
+  // scoreLead, fetched inside the shared reveal loop below — an outage degrades
+  // to the old path rather than dying. The reveal loop is written exactly once.
+  if (pending.length > 0) {
+    hud.update({
+      status: `Scoring ${pending.length} lead${pending.length === 1 ? "" : "s"}…`,
+    })
 
-    let result: Awaited<ReturnType<typeof scoreLead>>
+    let batch: BatchScore[] | null
     try {
-      result = await scoreLead(cand, initial.folderId)
+      batch = await scoreLeads(pending.map((p) => p.cand), initial.folderId)
     } catch (err) {
-      node.classList.remove(SCANNING_CLASS)
       if (err instanceof InvalidFolderError) {
         await stopRun("That folder was deleted. Pick another and start again.")
         return
@@ -256,26 +267,93 @@ async function runPageStep(myTabId: number, hud: HudHandle) {
       throw err
     }
 
-    node.classList.remove(SCANNING_CLASS)
+    const plan: {
+      node: Element
+      cand: LeadCandidate
+      result: BatchScore | null
+      needsFetch: boolean
+    }[] = batch
+      ? pairResultsToCards(pending, batch).map((p) => ({
+          node: p.node,
+          cand: p.cand,
+          result: p.result,
+          needsFetch: false,
+        }))
+      : pending.map((p) => ({
+          node: p.node,
+          cand: p.cand,
+          result: null,
+          needsFetch: true,
+        }))
 
-    // scoreLead is a network call; a Stop click can land while it is in
-    // flight. Re-read immediately before the persisted mutation and bail
-    // without writing. Writing back a pre-await snapshot here is exactly what
-    // would resurrect a cleared run.
-    const fresh = await getRunState()
-    if (!fresh || !fresh.active || fresh.tabId !== myTabId) return
+    // --- Phase 3: Reveal. Scroll to each card in order, dwell, badge from the
+    // already-fetched result (or, in the fallback, fetch it here).
+    for (const item of plan) {
+      const { node, cand } = item
 
-    seen.add(key)
-    fresh.seen = Array.from(seen)
+      // Re-read fresh before every card. The reveal runs for many seconds
+      // (settle plus pacing per card, plus a per-card round-trip in the
+      // fallback), so Stop and the caps must interrupt mid-page, not only
+      // between pages.
+      const before = await getRunState()
+      if (!before || !before.active || before.tabId !== myTabId) return
+      const decision = nextAction(before, Date.now())
+      if (decision.kind === "stop") {
+        await stopRun(decision.reason)
+        return
+      }
 
-    if (result) {
-      injectBadge(node, result.match_score, result.match_reasons, result.min_score)
-      // Only rows this call actually wrote. `stored` is also true for a dedupe
-      // hit (the row already existed), and a re-encountered lead must not count
-      // toward a cap that exists to bound NEW work — so gate on `inserted`, not
-      // `stored`. A card badged muted was scored and discarded; counting either
-      // would inflate the total and trip the cap early.
-      if (result.inserted) {
+      const key = cand.linkedin_url ?? `${cand.name ?? ""}|${cand.company ?? ""}`
+
+      // The animation. This is the whole reason a person can tell the extension
+      // is running: previously the only scroll in this file fired once, at the
+      // end of a page, after every card had already been scored.
+      node.scrollIntoView({ behavior: "smooth", block: "center" })
+      node.classList.add(SCANNING_CLASS)
+      await settle()
+
+      let result: BatchScore | ScoreResult | null = item.result
+      if (item.needsFetch) {
+        hud.update({ status: `Scoring ${cand.name ?? "a lead"}…` })
+        try {
+          result = await scoreLead(cand, initial.folderId)
+        } catch (err) {
+          node.classList.remove(SCANNING_CLASS)
+          if (err instanceof InvalidFolderError) {
+            await stopRun("That folder was deleted. Pick another and start again.")
+            return
+          }
+          throw err
+        }
+      }
+
+      // settle() (and, in the fallback, scoreLead) are awaits during which a
+      // Stop click can land. Re-read immediately before the persisted mutation
+      // and bail without writing. Writing back a pre-await snapshot here is
+      // exactly what would resurrect a cleared run.
+      const fresh = await getRunState()
+      if (!fresh || !fresh.active || fresh.tabId !== myTabId) {
+        node.classList.remove(SCANNING_CLASS)
+        return
+      }
+
+      if (result) {
+        // injectBadge fires for EVERY result, sub-threshold included: absence of
+        // a badge must always mean "Glint has not scored this card", never
+        // "Glint scored it low".
+        injectBadge(node, result.match_score, result.match_reasons, result.min_score)
+      }
+      node.classList.remove(SCANNING_CLASS)
+
+      seen.add(key)
+      fresh.seen = Array.from(seen)
+
+      if (result?.inserted) {
+        // Only rows this call actually wrote. `stored` is also true for a dedupe
+        // hit (the row already existed), and a re-encountered lead must not count
+        // toward a cap that exists to bound NEW work — so gate on `inserted`, not
+        // `stored`. A card badged muted was scored and discarded; counting either
+        // would inflate the total and trip the cap early.
         fresh.leadCount++
         // Queue for a contact-info visit — but ONLY on a fresh insert. A
         // sub-threshold lead was never stored and has no lead_id; a dedupe hit
@@ -290,15 +368,15 @@ async function runPageStep(myTabId: number, hud: HudHandle) {
           ]
         }
       }
-    }
-    await setRunState(fresh)
+      await setRunState(fresh)
 
-    if (result?.inserted) {
-      postProgress(fresh.leadCount, `Scored ${cand.name ?? "a lead"}`)
-      hud.update({ leadCount: fresh.leadCount })
-    }
+      if (result?.inserted) {
+        postProgress(fresh.leadCount, `Scored ${cand.name ?? "a lead"}`)
+        hud.update({ leadCount: fresh.leadCount })
+      }
 
-    await randomDelay(400, 900)
+      await randomDelay(REVEAL_MIN_MS, REVEAL_MAX_MS)
+    }
   }
 
   if (!everFoundCard) {
