@@ -1,0 +1,11 @@
+-- Rate-limits draft-opener, which is the only per-click, synchronous,
+-- user-facing LLM call in the product. Everything else (score-lead) is
+-- amortized across a 20-minute autonomous run and paced by the agent loop.
+--
+-- The limit has to survive the edge function's isolate being torn down between
+-- requests, so it lives in a column rather than in memory.
+--
+-- Written and read only by draft-opener, as the service role. No RLS or GRANT
+-- change is needed: `authenticated` already holds select/delete on this table
+-- (migration 20260708140000) and never touches this column.
+alter table public.extension_pairings add column last_draft_at timestamptz;
