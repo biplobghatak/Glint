@@ -22,20 +22,17 @@ export default defineConfig({
     keepProfileChanges: true,
     startUrls: ["https://www.linkedin.com/feed/"],
   },
-  // The Side Panel API is Chrome-only. Emitting side_panel/sidePanel on other
-  // targets makes WXT translate it into a Firefox sidebar_action, shipping a
-  // sidebar whose background listeners never register.
-  manifest: ({ browser }) => ({
+  // The popup is the extension's only UI surface. The Side Panel it replaced
+  // was Chrome-only, which is what forced this manifest to be a function of
+  // `browser`; nothing here is target-specific anymore. Run progress that the
+  // panel used to show persistently now lives on the toolbar badge and in an
+  // in-page overlay, because a popup unmounts the moment it loses focus and a
+  // run lasts up to maxMinutes.
+  manifest: {
     name: "Glint",
     description: "Score LinkedIn leads against your ICP as you browse.",
     action: { default_title: "Glint" },
-    permissions:
-      browser === "chrome"
-        ? ["storage", "sidePanel", "tabs"]
-        : ["storage", "tabs"],
+    permissions: ["storage", "tabs"],
     host_permissions: ["*://*.linkedin.com/*"],
-    ...(browser === "chrome"
-      ? { side_panel: { default_path: "sidepanel.html" } }
-      : {}),
-  }),
+  },
 })
