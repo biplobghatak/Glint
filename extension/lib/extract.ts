@@ -10,6 +10,7 @@ export type LeadCandidate = {
   post_text: string | null
   linkedin_url: string | null
   source: "profile" | "post" | "search_result"
+  avatar_url: string | null
 }
 
 function text(el: Element | null): string | null {
@@ -290,6 +291,35 @@ function extractCompanyFromHeadline(headline: string | null): string | null {
   return company.length > 0 ? company : null
 }
 
+// LinkedIn serves an inline SVG silhouette for members with no photo. Stored as
+// a real avatar it renders as a grey blob forever, and nothing downstream can
+// tell it from a genuine picture. Reject by source scheme and by the class name
+// LinkedIn puts on it; either alone would miss the other.
+function isGhostAvatar(img: HTMLImageElement): boolean {
+  const src = img.getAttribute("src") ?? ""
+  if (src.startsWith("data:")) return true
+  return /ghost-person|ghost_person/i.test(img.className)
+}
+
+/**
+ * The profile image off a search-result card. Free: no profile visit.
+ *
+ * Prefer an <img> inside the card's profile anchor — a card can also contain a
+ * company logo, and storing that as the lead's face is worse than storing
+ * nothing. Fails soft, like everything else pointed at LinkedIn's DOM.
+ */
+export function extractAvatarUrl(node: Element): string | null {
+  try {
+    const inAnchor = node.querySelector<HTMLImageElement>('a[href*="/in/"] img')
+    const img = inAnchor ?? node.querySelector<HTMLImageElement>("img")
+    if (!img || isGhostAvatar(img)) return null
+    const src = img.getAttribute("src")
+    return src && src.length > 0 ? src : null
+  } catch {
+    return null
+  }
+}
+
 // LinkedIn's DOM is unstable; every selector is best-effort and must fail soft.
 export function extractFromNode(node: Element): LeadCandidate | null {
   try {
@@ -319,6 +349,10 @@ export function extractFromNode(node: Element): LeadCandidate | null {
         post_text,
         linkedin_url,
         source: "post",
+        // No reliable avatar on a feed post's actor image — the actor block
+        // mixes reshares, company pages, and the poster's own face with no
+        // structural way to tell them apart here. Null rather than guess.
+        avatar_url: null,
       }
     }
 
@@ -364,6 +398,7 @@ export function extractFromNode(node: Element): LeadCandidate | null {
         post_text: null,
         linkedin_url,
         source: "search_result",
+        avatar_url: extractAvatarUrl(node),
       }
     }
 

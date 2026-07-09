@@ -53,6 +53,7 @@ export async function scoreLead(
           post_text: candidate.post_text,
           linkedin_url: candidate.linkedin_url,
           source: candidate.source,
+          avatar_url: candidate.avatar_url,
         },
         folder_id: folderId,
       }),

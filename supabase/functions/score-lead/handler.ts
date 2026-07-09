@@ -15,6 +15,7 @@ type ProfileData = {
   post_text?: string
   linkedin_url?: string
   source?: "extension" | "profile" | "post" | "search_result"
+  avatar_url?: string
 }
 
 type Icp = {
@@ -270,6 +271,7 @@ export async function handler(req: Request): Promise<Response> {
       match_reasons: score.match_reasons,
       source: profile_data.source ?? "extension",
       folder_id: folder_id ?? null,
+      avatar_url: profile_data.avatar_url ?? null,
     })
     .select("id")
     .single()
