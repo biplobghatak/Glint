@@ -29,6 +29,58 @@ function sendMessage(message: RuntimeMessage) {
   chrome.runtime.sendMessage(message).catch(() => {})
 }
 
+// Clears glint_run when it can no longer possibly be driven by any content
+// script — an "orphaned" run. Nothing else ever clears a run except the
+// tab closing (onRemoved) or the agent loop's own cap checks, both of which
+// require a live content script on the run's own tab. Two ordinary paths
+// destroy that content script without ever satisfying either: navigating the
+// run tab off LinkedIn, and a browser restart (session restore reassigns tab
+// ids, so the rebooted content script never matches state.tabId again). This
+// reconciliation is the backstop for both.
+//
+// `navigatedTabId`, when provided (called from onUpdated), lets us skip the
+// chrome.tabs.get round-trip for tabs that aren't the run's own tab — it is
+// purely a fast-path filter, not a correctness requirement (reconcileRunState()
+// re-derives everything from state.tabId regardless).
+async function reconcileRunState(navigatedTabId?: number): Promise<void> {
+  const state = await getRunState()
+  if (!state?.active) return
+  if (navigatedTabId !== undefined && navigatedTabId !== state.tabId) return
+
+  // Backstop for the maxMinutes cap, which is otherwise only ever enforced
+  // from inside runAgentLoop() — if no tab is running that loop anymore
+  // (e.g. it was navigated away before the cap tripped), nothing else would
+  // ever notice the run overstayed its limit.
+  if (Date.now() - state.startedAt >= state.maxMinutes * 60_000) {
+    console.debug("Glint: clearing orphaned run — time cap elapsed", state.tabId)
+    await clearRunState()
+    return
+  }
+
+  chrome.tabs.get(state.tabId, (tab) => {
+    // Mirrors the existing onActivated handler's lastError/!tab check: the
+    // tab no longer exists (closed in a way onRemoved raced with, or —
+    // relevant here — replaced by a new tab id after a browser restart).
+    if (chrome.runtime.lastError || !tab) {
+      console.debug("Glint: clearing orphaned run — tab no longer exists", state.tabId)
+      clearRunState()
+      return
+    }
+    // The tab is alive but has genuinely navigated off LinkedIn, so no
+    // content script can be running there. A LinkedIn URL — even mid-load,
+    // backgrounded, or mid-SPA-navigation — is left alone; isLinkedIn() only
+    // ever returns false for a real cross-origin navigation.
+    if (!isLinkedIn(tab.url)) {
+      console.debug(
+        "Glint: clearing orphaned run — tab navigated away from LinkedIn",
+        state.tabId,
+        tab.url
+      )
+      clearRunState()
+    }
+  })
+}
+
 async function startRun(query: string, tabId: number) {
   try {
     const parsed = await parseQuery(query)
@@ -120,9 +172,24 @@ export default defineBackground(() => {
       }
     })
 
+    // Reconcile once at every service-worker startup. An MV3 SW is evicted
+    // when idle and restarts often (on its own, and definitely across a
+    // browser restart), so this runs naturally and regularly — it's what
+    // catches a run left active after the browser itself was restarted with
+    // glint_run still persisted (session restore gives the tab a new id, so
+    // no content script will ever match state.tabId again).
+    reconcileRunState()
+
     chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
       if (changeInfo.url !== undefined || changeInfo.status === "complete") {
         syncPanelForTab(tabId, tab.url)
+      }
+      // The "navigated away" trigger: only a URL change can turn a live,
+      // on-LinkedIn run tab into an orphan, so that's the only changeInfo
+      // that needs to re-check. navigatedTabId lets reconcileRunState()
+      // skip its work for every tab update that isn't the run's own tab.
+      if (changeInfo.url !== undefined) {
+        reconcileRunState(tabId)
       }
     })
 

@@ -246,6 +246,30 @@ export default defineContentScript({
     // otherwise both modes can briefly score the same cards. See Fix 3.
     let loopRunning = false
 
+    // agentActive must mean "an agent loop is driving THIS tab", not "some
+    // run is active somewhere" — otherwise a run on tab A silently disables
+    // passive badging on every other LinkedIn tab for the run's whole
+    // duration. That requires knowing this tab's own id, which is resolved
+    // asynchronously (requestMyTabId(), below) — but browser.storage.onChanged
+    // is registered before that resolves. myTabId/tabIdResolved distinguish
+    // "not yet known" (tabIdResolved: false) from "known and null" (Firefox,
+    // or a WHICH_TAB request that failed) — collapsing those would either
+    // wrongly gate a real run's own tab off, or wrongly treat an unresolved
+    // tab id as a match. While unresolved, agentActive is forced false (never
+    // "not my run" mis-set as true) and re-evaluated the instant myTabId
+    // resolves, using whichever run state is freshest at that point.
+    let myTabId: number | null = null
+    let tabIdResolved = false
+    // Tracks the latest glint_run value observed via storage.onChanged, so
+    // that a change arriving *before* myTabId resolves isn't lost — it's
+    // replayed against the now-known myTabId as soon as resolution completes.
+    // Distinct from "undefined" meaning "no change observed yet": a change
+    // event legitimately carries newValue === undefined when the run was
+    // cleared, so a separate boolean (not `latestRunState !== undefined`)
+    // marks whether a change was observed at all.
+    let sawStorageChange = false
+    let latestRunState: RunState | undefined
+
     // --- existing passive scan (unchanged behavior, gated off during a run) ---
     const seen = new Set<string>()
     const queue: { node: Element; cand: LeadCandidate }[] = []
@@ -310,13 +334,23 @@ export default defineContentScript({
       scan(document)
     }
 
+    // Computes "is an agent loop driving THIS tab" from a RunState snapshot.
+    // Returns false unconditionally until myTabId has resolved — an unknown
+    // tab id must never be treated as a match.
+    function computeAgentActive(state: RunState | undefined | null): boolean {
+      if (!tabIdResolved) return false
+      return !!state?.active && myTabId !== null && state.tabId === myTabId
+    }
+
     // --- agent mode ---
     // Keep this listener registered unconditionally so agentActive flips
     // correctly whenever a run starts or stops later, in either direction.
     browser.storage.onChanged.addListener((changes, area) => {
       if (area !== "local" || !changes.glint_run) return
       const newState = changes.glint_run.newValue as RunState | undefined
-      agentActive = !!newState?.active
+      sawStorageChange = true
+      latestRunState = newState
+      agentActive = computeAgentActive(newState)
       // Don't re-arm passive mode here if this tab's own agent loop is still
       // unwinding (e.g. finishing a scoreLead() call after Stop cleared
       // glint_run). runAgentLoop()'s .finally() below is the one that calls
@@ -335,9 +369,16 @@ export default defineContentScript({
     // matches). Any other LinkedIn tab that loads or navigates during a run
     // (e.g. a lead's profile opened in a new tab) must fall back to passive
     // mode instead of independently scanning/paginating/mutating glint_run.
-    Promise.all([requestMyTabId(), getRunState()]).then(([myTabId, state]) => {
-      agentActive = !!state?.active
-      if (agentActive && state && myTabId !== null && state.tabId === myTabId) {
+    Promise.all([requestMyTabId(), getRunState()]).then(([resolvedTabId, state]) => {
+      myTabId = resolvedTabId
+      tabIdResolved = true
+      // A storage.onChanged event may have arrived while myTabId was still
+      // resolving — that's the freshest known state and must win over the
+      // getRunState() snapshot taken back when this Promise.all was kicked
+      // off, which could already be stale by the time we get here.
+      const effectiveState = sawStorageChange ? latestRunState : (state ?? undefined)
+      agentActive = computeAgentActive(effectiveState)
+      if (agentActive && myTabId !== null) {
         loopRunning = true
         runAgentLoop(myTabId).finally(() => {
           loopRunning = false
