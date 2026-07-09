@@ -10,14 +10,13 @@ import {
   type BatchScore,
   type ScoreResult,
 } from "@/lib/score"
-import { getRunState, setRunState, clearRunState, type RunState } from "@/lib/run"
-import { sendRuntimeMessage, type RuntimeMessage, type WhichTabMessage, type WhichTabResponse, type EnrichMessage, type EnrichResponse } from "@/lib/messages"
+import { getRunState, setRunState, clearRunState, isRunning, type PauseReason, type RunState } from "@/lib/run"
+import { sendRuntimeMessage, type RuntimeMessage, type WhichTabMessage, type WhichTabResponse } from "@/lib/messages"
 import { consumeDraft } from "@/lib/draft"
 import { openConnectAndFill } from "@/lib/connect"
 import { buildSearchUrl } from "@/lib/query"
 import { nextAction } from "@/lib/agent-step"
-import { isContactInfoPath, extractContactInfo, CONTACT_INFO_PATH } from "@/lib/contact"
-import { profilePathFromUrl, nextEnrichStep } from "@/lib/enrich"
+import { isContactInfoPath, extractContactInfo } from "@/lib/contact"
 import { renderHud, HUD_TAG, type HudHandle } from "@/lib/hud"
 import { formatScore } from "@/lib/format"
 import { renderDraftCard } from "./draft-card"
@@ -141,6 +140,14 @@ async function stopRun(reason: string) {
   sendMessage({ type: "STOPPED", reason })
 }
 
+// A pause keeps glint_run. The background owns the transition (it is the only
+// listener that can also pause on behalf of the watchdog), so this is a message,
+// not a write — two writers to one status field is how a resume gets clobbered
+// by a stale pause.
+function pauseRun(reason: PauseReason) {
+  sendMessage({ type: "PAUSE_RUN", reason })
+}
+
 function postProgress(leadCount: number, status: string) {
   sendMessage({ type: "PROGRESS", leadCount, status })
 }
@@ -197,7 +204,7 @@ let warnedAboutNoCards = false
  */
 async function runPageStep(myTabId: number, hud: HudHandle) {
   const initial = await getRunState()
-  if (!initial || !initial.active || initial.tabId !== myTabId) return
+  if (!isRunning(initial) || initial.tabId !== myTabId) return
 
   hud.update({
     leadCount: initial.leadCount,
@@ -209,22 +216,25 @@ async function runPageStep(myTabId: number, hud: HudHandle) {
   const seen = new Set(initial.seen)
   let everFoundCard = false
 
-  // Preserved from the old loop, and load-bearing for different reasons.
-  //
-  // A smooth scroll does not animate in a background tab, so a run in a tab
-  // the user cannot see would score the whole page instantly and invisibly --
-  // defeating the HUD. Wait for the tab to come back instead.
-  while (document.hidden) {
-    const s = await getRunState()
-    if (!s || !s.active || s.tabId !== myTabId) return
-    await randomDelay(2000, 4000)
+  // A hidden page is a throttled page: Chrome clamps its timers to 1/second and,
+  // after five minutes hidden, to one wake-up per MINUTE, while rAF and
+  // IntersectionObserver stop firing entirely — so LinkedIn's lazily-rendered
+  // result cards may never appear. Pushing on would produce an empty page and a
+  // spurious "couldn't find result cards" stop. Pause instead; the background
+  // resumes us when the window is visible again.
+  if (document.hidden) {
+    pauseRun("hidden")
+    return
   }
 
-  // LinkedIn cuts off search for free accounts that browse too much. Scoring
-  // an empty results page would otherwise stop the run with "couldn't find
-  // result cards", pointing the reader at extract.ts instead of the truth.
+  // LinkedIn cuts off search for accounts that browse too much. Scoring an empty
+  // results page would otherwise stop the run with "couldn't find result cards",
+  // pointing the reader at extract.ts instead of the truth. This is a pause, not
+  // a stop: `page` and `seen` are worth keeping, so a resume tomorrow continues
+  // from here rather than re-walking (and re-charging for) everything already
+  // scanned.
   if (hasCommercialLimitBanner()) {
-    await stopRun("LinkedIn search limit reached — try again later")
+    pauseRun("commercial_limit")
     return
   }
 
@@ -297,13 +307,26 @@ async function runPageStep(myTabId: number, hud: HudHandle) {
 
       // Re-read fresh before every card. The reveal runs for many seconds
       // (settle plus pacing per card, plus a per-card round-trip in the
-      // fallback), so Stop and the caps must interrupt mid-page, not only
+      // fallback), so Stop, Pause and the caps must interrupt mid-page, not only
       // between pages.
       const before = await getRunState()
-      if (!before || !before.active || before.tabId !== myTabId) return
+      if (!before || before.tabId !== myTabId) return
       const decision = nextAction(before, Date.now())
       if (decision.kind === "stop") {
         await stopRun(decision.reason)
+        return
+      }
+      // Paused mid-page. Return without writing: `seen` already holds every card
+      // scored so far, so the resume re-enters this page and skips straight to
+      // the first card it hasn't scored.
+      if (decision.kind === "wait") {
+        node.classList.remove(SCANNING_CLASS)
+        return
+      }
+      // The window was minimized or covered between cards. Same deal.
+      if (document.hidden) {
+        node.classList.remove(SCANNING_CLASS)
+        pauseRun("hidden")
         return
       }
 
@@ -312,7 +335,12 @@ async function runPageStep(myTabId: number, hud: HudHandle) {
       // The animation. This is the whole reason a person can tell the extension
       // is running: previously the only scroll in this file fired once, at the
       // end of a page, after every card had already been scored.
-      node.scrollIntoView({ behavior: "smooth", block: "center" })
+      //
+      // "auto", not "smooth": a smooth scroll is driven by requestAnimationFrame,
+      // which does not fire in a hidden tab — so the moment visibility lapsed
+      // mid-page the scroll would never land and the loop would hang here rather
+      // than pause cleanly. An instant scroll is synchronous and always lands.
+      node.scrollIntoView({ behavior: "auto", block: "center" })
       node.classList.add(SCANNING_CLASS)
       await settle()
 
@@ -332,11 +360,11 @@ async function runPageStep(myTabId: number, hud: HudHandle) {
       }
 
       // settle() (and, in the fallback, scoreLead) are awaits during which a
-      // Stop click can land. Re-read immediately before the persisted mutation
-      // and bail without writing. Writing back a pre-await snapshot here is
-      // exactly what would resurrect a cleared run.
+      // Stop click or a Pause can land. Re-read immediately before the persisted
+      // mutation and bail without writing. Writing back a pre-await snapshot here
+      // is exactly what would resurrect a cleared run — or un-pause a paused one.
       const fresh = await getRunState()
-      if (!fresh || !fresh.active || fresh.tabId !== myTabId) {
+      if (!isRunning(fresh) || fresh.tabId !== myTabId) {
         node.classList.remove(SCANNING_CLASS)
         return
       }
@@ -358,19 +386,13 @@ async function runPageStep(myTabId: number, hud: HudHandle) {
         // toward a cap that exists to bound NEW work — so gate on `inserted`, not
         // `stored`. A card badged muted was scored and discarded; counting either
         // would inflate the total and trip the cap early.
+        //
+        // No contact-info visit is queued here, and none ever should be. Scoring
+        // a card off the results page costs nothing; opening the lead's profile
+        // spends LinkedIn's commercial-use budget, and a full-depth run stores up
+        // to maxLeads of them. Enrichment is a separate, metered pass the user
+        // starts from the panel — see lib/enrich-pass.ts.
         fresh.leadCount++
-        // Queue for a contact-info visit — but ONLY on a fresh insert. A
-        // sub-threshold lead was never stored and has no lead_id; a dedupe hit
-        // (stored:true, inserted:false) already exists and is not re-enriched by
-        // this run. lead_id rides on the fresh-insert response; profilePathFromUrl
-        // returns null for a lead with no usable /in/ URL, which we simply skip.
-        const profilePath = profilePathFromUrl(cand.linkedin_url)
-        if (result.lead_id && profilePath) {
-          fresh.enrichQueue = [
-            ...fresh.enrichQueue,
-            { leadId: result.lead_id, profilePath },
-          ]
-        }
       }
       await setRunState(fresh)
 
@@ -398,21 +420,10 @@ async function runPageStep(myTabId: number, hud: HudHandle) {
     return
   }
 
-  // The page is scored. Before paginating, visit each STORED lead's contact-info
-  // overlay in a background tab and enrich it — serially, announced, fail-soft.
-  const scanned = await getRunState()
-  if (!scanned || !scanned.active || scanned.tabId !== myTabId) return
-  scanned.phase = "enriching"
-  await setRunState(scanned)
-  await runEnrichment(myTabId, hud)
-
-  // The page is done. nextAction decides whether another one follows. Enrichment
-  // is best-effort and may have stopped the run (Stop, time cap) — re-read and
-  // bail if so. The queue is emptied here so the next page starts clean.
+  // The page is done. nextAction decides whether another one follows.
   const done = await getRunState()
-  if (!done || !done.active || done.tabId !== myTabId) return
+  if (!isRunning(done) || done.tabId !== myTabId) return
   done.phase = "paginating"
-  done.enrichQueue = []
   await setRunState(done)
 
   const decision = nextAction(done, Date.now())
@@ -420,6 +431,7 @@ async function runPageStep(myTabId: number, hud: HudHandle) {
     await stopRun(decision.reason)
     return
   }
+  if (decision.kind === "wait") return
   if (decision.kind === "navigate") {
     hud.update({ status: `Opening page ${decision.page}…` })
     const next: RunState = {
@@ -432,51 +444,6 @@ async function runPageStep(myTabId: number, hud: HudHandle) {
     // reconcileRunState() watches chrome.tabs.onUpdated to notice a run tab
     // leaving LinkedIn. Two owners would make that reconciliation lie.
     sendMessage({ type: "NAVIGATE", url: buildSearchUrl(done.parsed, decision.page) })
-  }
-}
-
-// Asks the background to run one contact-info lookup and awaits its completion.
-// Awaiting the response is what serialises the pass: the background opens exactly
-// one background tab, enriches, closes it, and only then replies — so the next
-// lookup can't start until this one is fully done. A rejection (service worker
-// gone, channel torn down) is the caller's problem to swallow; a failed lookup
-// must never stop a run.
-async function requestEnrich(leadId: string, url: string): Promise<void> {
-  ;(await chrome.runtime.sendMessage({
-    type: "ENRICH",
-    leadId,
-    url,
-  } satisfies EnrichMessage)) as EnrichResponse | undefined
-}
-
-// Visits every lead stored on this page, in series, and enriches it with the
-// email/phone from its contact-info overlay. Announced in the HUD; never
-// parallel; never fatal. State is re-read each step so Stop and the time cap
-// interrupt between leads — the lead cap deliberately does not (see nextEnrichStep).
-async function runEnrichment(myTabId: number, hud: HudHandle): Promise<void> {
-  let index = 0
-  for (;;) {
-    const state = await getRunState()
-    if (!state || !state.active || state.tabId !== myTabId) return
-    const step = nextEnrichStep(state, index, Date.now())
-    if (step.kind === "done") return
-    if (step.kind === "stop") {
-      await stopRun(step.reason)
-      return
-    }
-    hud.update({ status: step.label })
-    const url = `${location.origin}${CONTACT_INFO_PATH(step.profilePath)}`
-    try {
-      await requestEnrich(step.leadId, url)
-    } catch (err) {
-      // A failed lookup must never stop a run: swallow and move on. The
-      // background enriches with nulls on its own 10s timeout, so enriched_at is
-      // still stamped in the ordinary failure cases.
-      console.debug("Glint: enrich request failed", err)
-    }
-    index++
-    // Pace like the card loop — one background tab at a time, never a burst.
-    await randomDelay(400, 900)
   }
 }
 
@@ -690,29 +657,112 @@ export default defineContentScript({
       scan(document)
     }
 
-    // Computes "is an agent loop driving THIS tab" from a RunState snapshot.
-    // Returns false unconditionally until myTabId has resolved — an unknown
-    // tab id must never be treated as a match.
+    // Computes "does a run own THIS tab" from a RunState snapshot. True while
+    // the run is PAUSED too: a paused run still owns its tab, and letting
+    // passive mode re-arm underneath it would badge — and double-score — the
+    // very cards the resume is about to walk. Returns false unconditionally
+    // until myTabId has resolved: an unknown tab id must never be a match.
     function computeAgentActive(state: RunState | undefined | null): boolean {
       if (!tabIdResolved) return false
-      return !!state?.active && myTabId !== null && state.tabId === myTabId
+      return !!state && myTabId !== null && state.tabId === myTabId
+    }
+
+    // The HUD outlives a pause. Mounted on the first drive, torn down only when
+    // the run leaves storage for good — otherwise a `hidden` pause (the common
+    // one) would make it vanish and reappear every time the user glanced at
+    // another window.
+    let hudHandle: { hud: HudHandle; remove: () => void } | null = null
+
+    async function ensureHud(): Promise<HudHandle> {
+      if (!hudHandle) hudHandle = await mountHud(ctx, () => sendMessage({ type: "STOP_RUN" }))
+      return hudHandle.hud
+    }
+
+    function teardownHud() {
+      hudHandle?.remove()
+      hudHandle = null
+    }
+
+    /**
+     * Drives one page step, then stops.
+     *
+     * Re-entrant by design and guarded by `loopRunning`: a resume re-enters the
+     * same page, and `seen` makes that idempotent — every card already scored is
+     * skipped, and the walk picks up at the first one that wasn't.
+     */
+    async function drive() {
+      if (loopRunning || myTabId === null) return
+      loopRunning = true
+      try {
+        const hud = await ensureHud()
+        // An unexpected throw from the page step (e.g. findSearchResultCards /
+        // extractFromNode choking on hostile markup) would otherwise leave
+        // glint_run at `running` with nothing driving it, clearing only when the
+        // watchdog's maxMinutes backstop fires. Stop the run here instead. This
+        // only fires on a real throw — a deliberate navigate, pause, or an
+        // already-issued stopRun returns normally and never reaches here.
+        await runPageStep(myTabId, hud).catch(async (err) => {
+          console.error("Glint: page step failed", err)
+          await stopRun("Something went wrong on this page")
+        })
+      } catch (err) {
+        console.debug("Glint: mountHud failed", err)
+      } finally {
+        loopRunning = false
+        // A run that ended (state gone) hands the tab back to passive mode. A
+        // paused or navigating run keeps it.
+        const after = await getRunState()
+        if (!computeAgentActive(after)) {
+          teardownHud()
+          startPassive()
+        } else if (after && after.status === "paused") {
+          hudHandle?.hud.update({ status: "Paused" })
+        }
+      }
     }
 
     // --- agent mode ---
-    // Keep this listener registered unconditionally so agentActive flips
-    // correctly whenever a run starts or stops later, in either direction.
+    // Keep this listener registered unconditionally so the tab reacts whenever a
+    // run starts, pauses, resumes, or ends — in every direction.
     browser.storage.onChanged.addListener((changes, area) => {
       if (area !== "local" || !changes.glint_run) return
       const newState = changes.glint_run.newValue as RunState | undefined
       sawStorageChange = true
       latestRunState = newState
       agentActive = computeAgentActive(newState)
-      // Don't re-arm passive mode here if this tab's own page step is still
-      // unwinding (e.g. finishing a scoreLead() call after Stop cleared
-      // glint_run). runPageStep()'s .finally() below is the one that calls
-      // startPassive() once the step has actually exited, sequencing the
-      // handoff instead of racing it.
-      if (!agentActive && !loopRunning) startPassive()
+
+      if (!agentActive) {
+        // Don't re-arm passive mode if this tab's own page step is still
+        // unwinding (e.g. finishing a scoreLead() call after Stop cleared
+        // glint_run). drive()'s finally is the one that hands over, sequencing
+        // it instead of racing it.
+        if (!loopRunning) {
+          teardownHud()
+          startPassive()
+        }
+        return
+      }
+      // Resumed: pick the page back up. This is what makes a `hidden` pause
+      // invisible to the user — they un-cover the window, the background flips
+      // the status, and this listener re-drives the very card we left off on.
+      if (newState?.status === "running") void drive()
+      else hudHandle?.hud.update({ status: "Paused" })
+    })
+
+    // The single signal every Chrome throttle keys off. Pausing here is not a
+    // nicety: a hidden page's timers are clamped to one wake-up per minute after
+    // five minutes, and its IntersectionObserver stops firing, so LinkedIn's
+    // lazily-rendered cards may never appear. Reporting it lets the run stop
+    // cleanly at a card boundary rather than wedge mid-page.
+    document.addEventListener("visibilitychange", () => {
+      if (!agentActive) return
+      const state = latestRunState
+      if (document.hidden) {
+        if (state?.status === "running") pauseRun("hidden")
+      } else if (state?.status === "paused" && state.pauseReason === "hidden") {
+        // Auto-resume, and only from the pause the user did not choose.
+        sendMessage({ type: "RESUME_RUN" })
+      }
     })
 
     // Resolve BOTH this tab's own id and the run state BEFORE doing any
@@ -725,7 +775,7 @@ export default defineContentScript({
     // matches). Any other LinkedIn tab that loads or navigates during a run
     // (e.g. a lead's profile opened in a new tab) must fall back to passive
     // mode instead of independently scanning/paginating/mutating glint_run.
-    Promise.all([requestMyTabId(), getRunState()]).then(([resolvedTabId, state]) => {
+    Promise.all([requestMyTabId(), getRunState()]).then(async ([resolvedTabId, state]) => {
       myTabId = resolvedTabId
       tabIdResolved = true
       // A storage.onChanged event may have arrived while myTabId was still
@@ -733,34 +783,25 @@ export default defineContentScript({
       // getRunState() snapshot taken back when this Promise.all was kicked
       // off, which could already be stale by the time we get here.
       const effectiveState = sawStorageChange ? latestRunState : (state ?? undefined)
+      latestRunState = effectiveState
       agentActive = computeAgentActive(effectiveState)
-      if (agentActive && myTabId !== null) {
-        loopRunning = true
-        mountHud(ctx, () => sendMessage({ type: "STOP_RUN" }))
-          .then(({ hud, remove }) =>
-            // An unexpected throw from the page step (e.g. findSearchResultCards
-            // / extractFromNode choking on hostile markup) would otherwise reject
-            // out to the outer .catch: the HUD is torn down and passive mode
-            // resumes, but glint_run stays active: true with nothing driving it,
-            // clearing only when reconcileRunState()'s maxMinutes backstop fires.
-            // Catch it here and stopRun so the run ends now. This only fires on a
-            // real throw — a deliberate navigate or an already-issued stopRun
-            // returns normally and never reaches here. finally(remove) is
-            // untouched: a bare `return` inside the card loop still removes the HUD.
-            runPageStep(myTabId!, hud)
-              .catch((err) => {
-                console.error("Glint: page step failed", err)
-                return stopRun("Something went wrong on this page")
-              })
-              .finally(remove)
-          )
-          .catch((err) => console.debug("Glint: mountHud failed", err))
-          .finally(() => {
-            loopRunning = false
-            startPassive()
-          })
-      } else {
+
+      if (!agentActive) {
         startPassive()
+        return
+      }
+      if (effectiveState?.status === "running") {
+        void drive()
+        return
+      }
+      // A paused run whose tab was just reopened. Show the HUD rather than a
+      // blank results page, and let a `hidden` pause resume itself if the window
+      // is in fact visible — the pause may have been recorded by the watchdog
+      // while this tab was still being rebuilt.
+      const hud = await ensureHud()
+      hud.update({ status: "Paused" })
+      if (effectiveState?.pauseReason === "hidden" && !document.hidden) {
+        sendMessage({ type: "RESUME_RUN" })
       }
     })
   },

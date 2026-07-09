@@ -30,8 +30,11 @@ export default defineConfig({
     description: "Score LinkedIn leads against your ICP as you browse.",
     action: { default_title: "Glint" },
     permissions:
+      // "alarms" drives the run watchdog: a discarded or frozen run tab runs no
+      // JavaScript and cannot report that it stopped, so the service worker has
+      // to wake periodically and notice. chrome.alarms is undefined without it.
       browser === "chrome"
-        ? ["storage", "sidePanel", "tabs"]
+        ? ["storage", "sidePanel", "tabs", "alarms"]
         : ["storage", "tabs"],
     host_permissions: ["*://*.linkedin.com/*"],
     ...(browser === "chrome"

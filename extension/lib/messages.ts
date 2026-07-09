@@ -1,3 +1,6 @@
+import type { EnrichTarget } from "@/lib/enrich-pass"
+import type { PauseReason } from "@/lib/run"
+
 export type StartRunMessage = {
   type: "START_RUN"
   query: string
@@ -6,6 +9,13 @@ export type StartRunMessage = {
   folderId: string | null
 }
 export type StopRunMessage = { type: "STOP_RUN" }
+// A run halts for four reasons and only one of them is a stop. Pause keeps
+// glint_run — `page` and `seen` above all — so resuming continues at the next
+// page without rescoring, and without re-spending commercial-use budget on
+// pages already walked. Sent by the panel (user), and by the background when
+// the run window is hidden or its tab closes.
+export type PauseRunMessage = { type: "PAUSE_RUN"; reason: PauseReason }
+export type ResumeRunMessage = { type: "RESUME_RUN" }
 // Sent by the content script when a results page is exhausted and another
 // follows. The background owns tab navigation; see runPageStep's comment.
 export type NavigateMessage = { type: "NAVIGATE"; url: string }
@@ -13,6 +23,14 @@ export type ProgressMessage = {
   type: "PROGRESS"
   leadCount: number
   status: string
+}
+// Distinct from STOPPED: the run is still in storage and still resumable. The
+// panel must render a Resume affordance, not an ended run.
+export type PausedMessage = {
+  type: "PAUSED"
+  reason: PauseReason
+  /** Human-facing line, e.g. "Paused — keep the Glint window visible." */
+  message: string
 }
 export type StoppedMessage = { type: "STOPPED"; reason: string }
 export type RunErrorMessage = { type: "RUN_ERROR"; error: string }
@@ -23,14 +41,32 @@ export type RunErrorMessage = { type: "RUN_ERROR"; error: string }
 // never sent via chrome.runtime.sendMessage/onMessage as a standalone
 // message, only as the sendResponse payload for this request.
 export type WhichTabMessage = { type: "WHICH_TAB" }
-// Sent by the run's OWN tab, once per stored lead, to have the background open
-// that lead's contact-info overlay in a background tab, extract email/phone, call
-// enrich-lead, and close the tab. Request/response (the sender awaits
-// EnrichResponse) so the run enriches leads serially — one background tab at a
-// time. Ten simultaneous profile loads is a browsing pattern no human produces,
-// so this must never fan out. `url` is the full contact-info overlay URL; the
-// background re-checks it is a LinkedIn URL before navigating.
-export type EnrichMessage = { type: "ENRICH"; leadId: string; url: string }
+// Sent by the SIDE PANEL to begin a standalone contact-info pass over leads the
+// user picked. Not sent by a run: visiting a profile is the one action that
+// spends LinkedIn's commercial-use budget, so it is never a side effect of
+// scanning. See lib/enrich-pass.ts. The background owns the whole pass — it
+// opens one background tab at a time, extracts, enriches, closes, and paces.
+// Ten simultaneous profile loads is a browsing pattern no human produces, so
+// this must never fan out.
+export type StartEnrichMessage = {
+  type: "START_ENRICH"
+  targets: EnrichTarget[]
+}
+export type StopEnrichMessage = { type: "STOP_ENRICH" }
+// Broadcast by the background as the pass walks its queue, for the panel.
+export type EnrichProgressMessage = {
+  type: "ENRICH_PROGRESS"
+  done: number
+  total: number
+  status: string
+}
+// Broadcast once, when the pass ends for any reason (drained, Stop, or the
+// daily profile-view budget). `enriched` counts lookups actually attempted.
+export type EnrichStoppedMessage = {
+  type: "ENRICH_STOPPED"
+  reason: string
+  enriched: number
+}
 // Sent by the content script running ON a contact-info overlay tab, reporting
 // what extractContactInfo() found (both null is a legitimate answer).
 // Fire-and-forget: the background correlates it to the pending enrichment by the
@@ -45,24 +81,24 @@ export type ContactInfoMessage = {
 export type RuntimeMessage =
   | StartRunMessage
   | StopRunMessage
+  | PauseRunMessage
+  | ResumeRunMessage
   | NavigateMessage
   | ProgressMessage
+  | PausedMessage
   | StoppedMessage
   | RunErrorMessage
   | WhichTabMessage
-  | EnrichMessage
+  | StartEnrichMessage
+  | StopEnrichMessage
+  | EnrichProgressMessage
+  | EnrichStoppedMessage
   | ContactInfoMessage
 
 // Response payload for WhichTabMessage, delivered via sendResponse(). Kept
 // out of the RuntimeMessage union since it's never itself dispatched through
 // onMessage as an incoming message.
 export type WhichTabResponse = { tabId: number | null }
-
-// Response payload for EnrichMessage, delivered via sendResponse(). `done` is
-// always true: the background has finished (enriched the lead and closed the
-// tab, or given up on a timeout) by the time it replies. The run tab awaits it
-// purely to pace the next lookup, never to learn what was found.
-export type EnrichResponse = { done: true }
 
 /**
  * Typed wrapper over chrome.runtime.sendMessage.

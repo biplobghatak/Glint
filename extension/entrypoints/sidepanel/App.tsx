@@ -26,7 +26,9 @@ import {
 } from "@/lib/leads"
 import { assignFolder, createFolder, type FolderRow } from "@/lib/folders"
 import { DEFAULT_THEME, getTheme, setTheme, type Theme } from "@/lib/theme"
-import { DEFAULT_MAX_PAGES } from "@/lib/agent-step"
+import { DEFAULT_MAX_PAGES, LINKEDIN_MAX_PAGE } from "@/lib/agent-step"
+import { profilePathFromUrl } from "@/lib/enrich"
+import { DAILY_PROFILE_VIEW_BUDGET, type EnrichTarget } from "@/lib/enrich-pass"
 import { FilterBar } from "@/components/filter-bar"
 import { LeadList } from "@/components/lead-list"
 import { IcpChips } from "@/components/icp-chips"
@@ -45,6 +47,24 @@ function formatElapsed(startedAt: number, now: number): string {
 
 function isAbort(err: unknown): boolean {
   return err instanceof DOMException && err.name === "AbortError"
+}
+
+/**
+ * The loaded leads that a contact-info pass could still learn something from.
+ *
+ * `enriched_at !== null` means "already looked up", whether or not an email was
+ * found — re-visiting those profiles would spend LinkedIn's budget to learn
+ * nothing. A lead whose linkedin_url doesn't yield an `/in/` path has no
+ * contact-info overlay to open, so it is skipped rather than queued to fail.
+ */
+function enrichableLeads(leads: Lead[]): EnrichTarget[] {
+  const targets: EnrichTarget[] = []
+  for (const lead of leads) {
+    if (lead.enriched_at !== null) continue
+    const profilePath = profilePathFromUrl(lead.linkedin_url)
+    if (profilePath) targets.push({ leadId: lead.id, profilePath })
+  }
+  return targets
 }
 
 // Chips the user can pick from: the ICP's target geography, plus any country
@@ -72,14 +92,23 @@ export default function App() {
   const [query, setQuery] = useState("")
   const [maxPages, setMaxPages] = useState(DEFAULT_MAX_PAGES)
   const [running, setRunning] = useState(false)
+  // A paused run is neither running nor gone: it still owns its window, keeps
+  // its page and its `seen` set, and resumes without rescoring. The panel must
+  // offer Resume, not Start — Start would refuse anyway (glint_run still exists).
+  const [paused, setPaused] = useState(false)
   const [status, setStatus] = useState<string | null>(null)
   const [leadCount, setLeadCount] = useState(0)
   const [error, setError] = useState<string | null>(null)
   // Spec §5 asks the panel to show elapsed time against the run's cap, and §6
   // asks the accuracy caveat to stay visible. Neither shipped originally.
   const [startedAt, setStartedAt] = useState<number | null>(null)
-  const [maxMinutes, setMaxMinutes] = useState(20)
+  const [maxMinutes, setMaxMinutes] = useState(240)
   const [now, setNow] = useState(() => Date.now())
+
+  // The standalone contact-info pass. Independent of a run: scanning a results
+  // page is free, visiting a profile is not.
+  const [enriching, setEnriching] = useState(false)
+  const [enrichStatus, setEnrichStatus] = useState<string | null>(null)
 
   const [theme, setThemeState] = useState<Theme>(DEFAULT_THEME)
   useEffect(() => {
@@ -134,11 +163,14 @@ export default function App() {
   const thresholdTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const queryRef = useRef<HTMLTextAreaElement | null>(null)
 
+  // Ticks while paused too. The time cap is measured from startedAt and pausing
+  // does not stop that clock, so freezing the readout would tell the user they
+  // have more time than they do.
   useEffect(() => {
-    if (!running || startedAt === null) return
+    if ((!running && !paused) || startedAt === null) return
     const id = setInterval(() => setNow(Date.now()), 1000)
     return () => clearInterval(id)
-  }, [running, startedAt])
+  }, [running, paused, startedAt])
 
   useEffect(() => {
     // The side panel document is unloaded/remounted whenever Chrome disables
@@ -148,11 +180,12 @@ export default function App() {
     // unstoppable and Start would fire a second, overlapping run.
     Promise.all([getDeviceToken(), getRunState(), getPanelState()]).then(
       async ([token, run, panel]) => {
-        if (run?.active) {
-          setRunning(true)
+        if (run) {
+          setRunning(run.status === "running")
+          setPaused(run.status === "paused")
           setQuery(run.query)
           setLeadCount(run.leadCount)
-          setStatus("Run in progress…")
+          setStatus(run.status === "paused" ? "Paused" : "Run in progress…")
           // Rehydrating the true start time matters: the panel is remounted every
           // time Chrome disables it for a non-LinkedIn tab and re-enables it, and
           // an elapsed timer that restarted from zero on each remount would tell
@@ -203,16 +236,37 @@ export default function App() {
       if (message.type === "PROGRESS") {
         setLeadCount(message.leadCount)
         setStatus(message.status)
+        // A PROGRESS can only come from a running content script, so it is also
+        // the authoritative "we resumed" signal — the background does not
+        // broadcast one.
+        setRunning(true)
+        setPaused(false)
+      } else if (message.type === "PAUSED") {
+        setRunning(false)
+        setPaused(true)
+        setStatus(message.message)
+        // A pause is a good moment to see what the run has stored so far.
+        setRefreshKey((k) => k + 1)
       } else if (message.type === "STOPPED") {
         setRunning(false)
+        setPaused(false)
         setStartedAt(null)
         setStatus(message.reason)
         // The run just wrote leads the list can't know about.
         setRefreshKey((k) => k + 1)
       } else if (message.type === "RUN_ERROR") {
         setRunning(false)
+        setPaused(false)
         setStartedAt(null)
         setError(message.error)
+      } else if (message.type === "ENRICH_PROGRESS") {
+        setEnriching(true)
+        setEnrichStatus(message.status)
+      } else if (message.type === "ENRICH_STOPPED") {
+        setEnriching(false)
+        setEnrichStatus(message.reason)
+        // Contact info just landed on rows the list is already showing.
+        setRefreshKey((k) => k + 1)
       }
     }
     chrome.runtime.onMessage.addListener(onMessage)
@@ -446,7 +500,38 @@ export default function App() {
   function handleStop() {
     sendRuntimeMessage({ type: "STOP_RUN" })
     setRunning(false)
+    setPaused(false)
     setStartedAt(null)
+  }
+
+  function handlePause() {
+    sendRuntimeMessage({ type: "PAUSE_RUN", reason: "user" })
+    setRunning(false)
+    setPaused(true)
+  }
+
+  function handleResume() {
+    sendRuntimeMessage({ type: "RESUME_RUN" })
+    setPaused(false)
+    setRunning(true)
+    setStatus("Resuming…")
+  }
+
+  // Leads on screen that have never had a contact-info lookup, and whose
+  // linkedin_url yields a usable /in/ path. `enriched_at` is the load-bearing
+  // field: a lead with it set has been looked up, whether or not anything was
+  // found, and must not be visited a second time.
+  const enrichTargets: EnrichTarget[] = enrichableLeads(leads)
+
+  function handleEnrich() {
+    if (enrichTargets.length === 0) return
+    setEnrichStatus(null)
+    setEnriching(true)
+    sendRuntimeMessage({ type: "START_ENRICH", targets: enrichTargets })
+  }
+
+  function handleStopEnrich() {
+    sendRuntimeMessage({ type: "STOP_ENRICH" })
   }
 
   // Keeps the previous rows painted while a new filter's results are in flight.
@@ -611,21 +696,26 @@ export default function App() {
                 id="max-pages"
                 type="number"
                 min={1}
-                max={10}
+                max={LINKEDIN_MAX_PAGE}
                 value={maxPages}
-                disabled={running}
+                disabled={running || paused}
                 onChange={(e) => {
-                  // An empty input yields 0 (not NaN), which must be clamped to 1
-                  // to prevent it from persisting into RunState and making nextAction's
-                  // `page >= maxPages` comparison always true, causing the run to
-                  // paginate forever until the time cap.
+                  // An empty input yields 0 (not NaN). Clamp it: a 0 persisted
+                  // into RunState makes nextAction's `page >= maxPages` true on
+                  // page 1, so the run would stop before scanning anything. The
+                  // upper clamp is LinkedIn's own ceiling — past page 100 it
+                  // returns no new results.
                   const n = Number(e.target.value)
-                  setMaxPages(Number.isFinite(n) ? Math.min(10, Math.max(1, Math.trunc(n))) : 1)
+                  setMaxPages(
+                    Number.isFinite(n)
+                      ? Math.min(LINKEDIN_MAX_PAGE, Math.max(1, Math.trunc(n)))
+                      : 1
+                  )
                 }}
                 className="border-border bg-card focus-visible:ring-ring w-16 rounded-[var(--radius)] border px-2 py-1 text-sm outline-none focus-visible:ring-2 disabled:opacity-50"
               />
             </div>
-            {!running ? (
+            {!running && !paused ? (
               <button
                 type="submit"
                 className="bg-primary text-primary-foreground rounded-[var(--radius)] px-3 py-1.5 text-sm font-medium transition-opacity hover:opacity-90 disabled:opacity-50"
@@ -634,20 +724,29 @@ export default function App() {
                 Start
               </button>
             ) : (
-              <button
-                type="button"
-                onClick={handleStop}
-                className="border-border bg-card hover:bg-accent rounded-[var(--radius)] border px-3 py-1.5 text-sm transition-colors"
-              >
-                Stop
-              </button>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={paused ? handleResume : handlePause}
+                  className="bg-primary text-primary-foreground flex-1 rounded-[var(--radius)] px-3 py-1.5 text-sm font-medium transition-opacity hover:opacity-90"
+                >
+                  {paused ? "Resume" : "Pause"}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleStop}
+                  className="border-border bg-card hover:bg-accent flex-1 rounded-[var(--radius)] border px-3 py-1.5 text-sm transition-colors"
+                >
+                  Stop
+                </button>
+              </div>
             )}
           </form>
           )}
 
           {error && <p className="text-destructive text-sm">{error}</p>}
 
-          {(running || status) && (
+          {(running || paused || status) && (
             <div className="border-border bg-card flex flex-col gap-1 rounded-[var(--radius)] border p-3 text-sm">
               <div className="flex items-center justify-between">
                 <span className="text-2xl font-semibold tabular-nums">{leadCount}</span>
@@ -663,7 +762,7 @@ export default function App() {
                       (running ? "bg-primary animate-pulse" : "bg-muted-foreground")
                     }
                   />
-                  {running ? "Running" : "Idle"}
+                  {running ? "Running" : paused ? "Paused" : "Idle"}
                 </span>
               </div>
               <div className="text-muted-foreground flex items-center justify-between text-xs">
@@ -679,6 +778,47 @@ export default function App() {
                   {status}
                 </p>
               )}
+            </div>
+          )}
+
+          {/* Contact-info lookup. Deliberately a separate, explicit action
+              rather than something a run does on its own: scanning a results
+              page is free, but opening a lead's profile spends LinkedIn's
+              commercial-use budget and is what gets accounts restricted. */}
+          {(enrichTargets.length > 0 || enriching || enrichStatus) && (
+            <div className="border-border bg-card flex flex-col gap-2 rounded-[var(--radius)] border p-3">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs font-medium">Contact info</span>
+                <span className="text-muted-foreground text-xs tabular-nums">
+                  max {DAILY_PROFILE_VIEW_BUDGET}/day
+                </span>
+              </div>
+              {enriching ? (
+                <button
+                  type="button"
+                  onClick={handleStopEnrich}
+                  className="border-border bg-card hover:bg-accent rounded-[var(--radius)] border px-3 py-1.5 text-sm transition-colors"
+                >
+                  Stop lookup
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={handleEnrich}
+                  disabled={enrichTargets.length === 0}
+                  className="bg-primary text-primary-foreground rounded-[var(--radius)] px-3 py-1.5 text-sm font-medium transition-opacity hover:opacity-90 disabled:opacity-50"
+                >
+                  Look up {enrichTargets.length} lead
+                  {enrichTargets.length === 1 ? "" : "s"}
+                </button>
+              )}
+              {enrichStatus && (
+                <p className="text-muted-foreground text-xs">{enrichStatus}</p>
+              )}
+              <p className="text-muted-foreground text-xs">
+                Visits each profile in a background tab. LinkedIn counts these
+                against your monthly limit.
+              </p>
             </div>
           )}
 
