@@ -74,7 +74,14 @@ export async function parseQuery(query: string): Promise<ParsedQuery> {
   return body
 }
 
-export function buildSearchUrl(parsed: ParsedQuery): string {
+/**
+ * `page` is a URL parameter, not a button. LinkedIn's class names and
+ * aria-labels rotate; a query-string parameter does not. The previous
+ * implementation clicked a "Next" button whose selectors this file's own
+ * comments admitted were unverified, and silently fell back to a scroll when
+ * they missed -- which is why runs never left page 1.
+ */
+export function buildSearchUrl(parsed: ParsedQuery, page = 1): string {
   const params = new URLSearchParams()
   const kw = [parsed.keywords, parsed.location]
     .filter((s) => s && s.trim())
@@ -82,5 +89,6 @@ export function buildSearchUrl(parsed: ParsedQuery): string {
     .trim()
   if (kw) params.set("keywords", kw)
   if (parsed.title && parsed.title.trim()) params.set("title", parsed.title.trim())
+  if (page > 1) params.set("page", String(page))
   return `https://www.linkedin.com/search/results/people/?${params.toString()}`
 }
