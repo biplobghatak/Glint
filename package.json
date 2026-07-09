@@ -1,6 +1,10 @@
 {
   "name": "glint-tooling",
   "private": true,
+  "scripts": {
+    "sync:theme": "node scripts/sync-theme.mjs",
+    "check:theme": "node scripts/sync-theme.mjs --check"
+  },
   "devDependencies": {
     "supabase": "^2.109.0"
   }
