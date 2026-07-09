@@ -452,3 +452,18 @@ enabled = true
 verify_jwt = false
 import_map = "./functions/update-icp/deno.json"
 entrypoint = "./functions/update-icp/index.ts"
+
+# manage-folders and update-lead are likewise panel-only, device_token
+# authenticated. Both run as the service role, which bypasses RLS, so each
+# checks row ownership explicitly rather than relying on a policy.
+[functions.manage-folders]
+enabled = true
+verify_jwt = false
+import_map = "./functions/manage-folders/deno.json"
+entrypoint = "./functions/manage-folders/index.ts"
+
+[functions.update-lead]
+enabled = true
+verify_jwt = false
+import_map = "./functions/update-lead/deno.json"
+entrypoint = "./functions/update-lead/index.ts"
