@@ -5,7 +5,13 @@ import tailwindcss from "@tailwindcss/vite"
 // See https://wxt.dev/api/config.html
 export default defineConfig({
   modules: ["@wxt-dev/module-react"],
-  vite: () => ({ plugins: [tailwindcss()] }),
+  vite: () => ({
+    plugins: [tailwindcss()],
+    // Stamp each build so the content script can announce which one is running.
+    // An unpacked extension does NOT auto-update: without this, a stale build
+    // is indistinguishable from a broken one.
+    define: { __GLINT_BUILD__: JSON.stringify(new Date().toISOString()) },
+  }),
   // `wxt dev` otherwise launches a throwaway Chrome profile every run, so you
   // are logged out of LinkedIn and Glint is unpaired each time — which makes
   // the extension impossible to exercise. Point it at a profile directory that

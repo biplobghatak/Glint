@@ -178,6 +178,7 @@ async function runAgentLoop(myTabId: number) {
     const cards = findSearchResultCards(document)
     let scoredThisBatch = 0
     let extractedThisBatch = 0
+    console.debug("Glint: batch — cards found:", cards.length, "url:", location.pathname)
 
     for (const node of cards) {
       // Re-check stop conditions fresh before every card, not just once per
@@ -316,6 +317,11 @@ async function runAgentLoop(myTabId: number) {
 export default defineContentScript({
   matches: ["*://*.linkedin.com/*"],
   main() {
+    // An unpacked extension never auto-updates — Chrome keeps running whatever
+    // was loaded last. Print the build stamp so a stale extension announces
+    // itself instead of masquerading as a code bug.
+    console.info(`Glint: content script active (build ${__GLINT_BUILD__})`)
+
     let agentActive = false
     let observerAttached = false
     // True for the whole lifetime of runAgentLoop() on THIS tab, from the
