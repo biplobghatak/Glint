@@ -57,6 +57,19 @@ function isAbort(err: unknown): boolean {
  * nothing. A lead whose linkedin_url doesn't yield an `/in/` path has no
  * contact-info overlay to open, so it is skipped rather than queued to fail.
  */
+/**
+ * A run *destination* expressed as a lead *filter*.
+ *
+ * The two vocabularies collide on `null` and mean opposite things: a
+ * destination's `null` is "unfiled", while a filter's `null` is "every folder".
+ * The filter spells unfiled as `""`. Translating in one named place is the only
+ * thing standing between "show me the folder I just picked" and "show me
+ * everything".
+ */
+function folderIdToFilter(destination: string | null): string {
+  return destination ?? ""
+}
+
 function enrichableLeads(leads: Lead[]): EnrichTarget[] {
   const targets: EnrichTarget[] = []
   for (const lead of leads) {
@@ -193,8 +206,9 @@ export default function App() {
           setStartedAt(run.startedAt)
           setMaxMinutes(run.maxMinutes)
           // An in-flight run has already chosen its destination; skip the picker
-          // straight to the query screen, which shows the Stop button.
+          // straight to the query screen, which shows the run's own controls.
           setDestination(run.folderId)
+          setFilter((f) => ({ ...f, folderId: folderIdToFilter(run.folderId) }))
           setScreen("query")
         } else {
           // No active run: restore the panel's pre-run choices. Without this, a
@@ -204,6 +218,12 @@ export default function App() {
           setDestination(panel.destination)
           setQuery(panel.query)
           setScreen(panel.destinationChosen ? "query" : "folder")
+          // Re-scope the list to the folder the user had already chosen. Without
+          // this a remount lands on the query screen showing every folder's
+          // leads, which is the state the picker exists to avoid.
+          if (panel.destinationChosen) {
+            setFilter((f) => ({ ...f, folderId: folderIdToFilter(panel.destination) }))
+          }
         }
         setPaired(token !== null)
         // Populate the switcher before the first list-leads round-trip, so a
@@ -534,6 +554,10 @@ export default function App() {
     sendRuntimeMessage({ type: "STOP_ENRICH" })
   }
 
+  // The folder picker owns the whole panel while it is up. A live or paused run
+  // has already chosen its destination, so it must never be sent back to it.
+  const onFolderScreen = screen === "folder" && !running && !paused
+
   // Keeps the previous rows painted while a new filter's results are in flight.
   const visibleLeads = useDeferredValue(leads)
   const chips = countryChips(targetCountries, visibleLeads)
@@ -632,18 +656,21 @@ export default function App() {
         </div>
       ) : (
         <>
-          {/* WHERE before WHO: a run chooses its destination before its query.
-              The picker replaces only the query form — the suggestion strip,
-              filters, and lead list below stay put. `running` forces the query
-              screen: a run in progress must show its Stop button, never the
-              picker. */}
-          {screen === "folder" && !running ? (
+          {/* WHERE before WHO: a run chooses its destination before its query,
+              and the picker is the ONLY thing on screen while it does. Showing
+              every folder's leads underneath a question about which folder to
+              use answered the question before it was asked. Once a folder is
+              chosen, the list below is scoped to it. A run in progress (or a
+              paused one) forces the query screen: it must show its own controls,
+              never the picker. */}
+          {onFolderScreen ? (
             <FolderPicker
               folders={folders}
               selected={destination}
               onSelect={setDestination}
               onContinue={() => {
                 setPanelState({ destination, destinationChosen: true })
+                setFilter((f) => ({ ...f, folderId: folderIdToFilter(destination) }))
                 setScreen("query")
               }}
               onCreateFolder={handleCreateDestinationFolder}
@@ -651,12 +678,17 @@ export default function App() {
               createError={createFolderError}
             />
           ) : (
+          <>
           <form onSubmit={handleStart} className="flex flex-col gap-2">
             {!running && (
               <button
                 type="button"
                 onClick={() => {
                   setPanelState({ destinationChosen: false })
+                  // Back to "every folder" — the picker is about to ask which one,
+                  // and leaving the old scope on would filter the folders' own
+                  // lead counts to the folder being replaced.
+                  setFilter((f) => ({ ...f, folderId: null }))
                   setScreen("folder")
                 }}
                 className="text-muted-foreground hover:text-foreground self-start text-xs"
@@ -742,7 +774,6 @@ export default function App() {
               </div>
             )}
           </form>
-          )}
 
           {error && <p className="text-destructive text-sm">{error}</p>}
 
@@ -866,9 +897,11 @@ export default function App() {
           />
 
           <p className="text-muted-foreground border-border mt-auto border-t pt-2 text-xs">
-            Glint scores what LinkedIn renders on the results list. It never opens
-            profiles, and scores are estimates.
+            Glint scores what LinkedIn renders on the results list. A run never
+            opens profiles, and scores are estimates.
           </p>
+          </>
+          )}
         </>
       )}
     </div>
