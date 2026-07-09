@@ -1,5 +1,6 @@
 import { LeadRow } from "@/components/lead-row"
 import type { LeadRow as Lead } from "@/lib/leads"
+import type { FolderRow } from "@/lib/folders"
 
 export function LeadList({
   leads,
@@ -13,6 +14,8 @@ export function LeadList({
   loadingMore,
   onLoadMore,
   filtersActive,
+  folders,
+  onAssignFolder,
 }: {
   leads: Lead[]
   minScore: number
@@ -25,6 +28,8 @@ export function LeadList({
   loadingMore: boolean
   onLoadMore: () => void
   filtersActive: boolean
+  folders: FolderRow[]
+  onAssignFolder: (leadId: string, folderId: string | null) => void
 }) {
   if (error) {
     return <p className="text-destructive py-6 text-center text-sm">{error}</p>
@@ -71,7 +76,13 @@ export function LeadList({
           }
         >
           {leads.map((lead) => (
-            <LeadRow key={lead.id} lead={lead} minScore={minScore} />
+            <LeadRow
+              key={lead.id}
+              lead={lead}
+              minScore={minScore}
+              folders={folders}
+              onAssignFolder={onAssignFolder}
+            />
           ))}
         </ul>
       )}

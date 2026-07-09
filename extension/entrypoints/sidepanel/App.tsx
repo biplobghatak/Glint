@@ -16,6 +16,7 @@ import {
   type LeadCursor,
   type LeadRow as Lead,
 } from "@/lib/leads"
+import { assignFolder, createFolder, type FolderRow } from "@/lib/folders"
 import { FilterBar } from "@/components/filter-bar"
 import { LeadList } from "@/components/lead-list"
 
@@ -73,6 +74,14 @@ export default function App() {
   const [listLoading, setListLoading] = useState(false)
   const [loadingMore, setLoadingMore] = useState(false)
   const [listError, setListError] = useState<string | null>(null)
+
+  // --- folders ---
+  const [folders, setFolders] = useState<FolderRow[]>([])
+  const [creatingFolder, setCreatingFolder] = useState(false)
+  const [createFolderError, setCreateFolderError] = useState<string | null>(null)
+  // Says out loud that the selected folder vanished. Silently resetting to "All
+  // folders" would look like the filter simply stopped working.
+  const [folderNotice, setFolderNotice] = useState<string | null>(null)
   // Bumped to force a refetch when nothing in `filter` changed — e.g. a run
   // just ended and wrote new leads.
   const [refreshKey, setRefreshKey] = useState(0)
@@ -170,7 +179,18 @@ export default function App() {
         setHasIcp(res.has_icp)
         setSavedMinScore(res.min_score)
         setSliderValue((v) => (v === res.min_score ? v : res.min_score))
+        setFolders(res.folders)
         setListLoading(false)
+
+        // The selected folder was deleted in the web app while the panel had it
+        // filtered. Its uuid is now dead, and list-leads answers with an empty
+        // page that reads as "no leads match" rather than "that folder is gone".
+        // Only a uuid can go stale: null and "" always exist.
+        const selected = filter.folderId
+        if (selected && !res.folders.some((f) => f.id === selected)) {
+          setFolderNotice("That folder was deleted. Showing all folders.")
+          setFilter((f) => ({ ...f, folderId: null }))
+        }
       })
       .catch((err: unknown) => {
         // An aborted request was superseded by a newer one; the newer one owns
@@ -221,6 +241,67 @@ export default function App() {
 
   useEffect(() => () => clearTimeout(thresholdTimerRef.current), [])
 
+  // manage-folders answers with the whole post-mutation list, so there is no
+  // local merge to get wrong. Resolves false on failure and the FilterBar keeps
+  // what the user typed.
+  const handleCreateFolder = useCallback(async (name: string): Promise<boolean> => {
+    setCreatingFolder(true)
+    setCreateFolderError(null)
+    try {
+      setFolders(await createFolder(name))
+      return true
+    } catch (err: unknown) {
+      // A 409 carries the server's "A folder named X already exists".
+      setCreateFolderError(
+        err instanceof Error ? err.message : "Couldn't create that folder"
+      )
+      return false
+    } finally {
+      setCreatingFolder(false)
+    }
+  }, [])
+
+  const handleAssignFolder = useCallback(
+    (leadId: string, folderId: string | null) => {
+      const lead = leads.find((l) => l.id === leadId)
+      if (!lead || lead.folder_id === folderId) return
+
+      const prevLeads = leads
+      const prevFolders = folders
+      const oldFolderId = lead.folder_id
+
+      // A lead's membership expressed in the filter's own vocabulary: "" is
+      // unfiled, matching LeadFilter.folderId's sentinel.
+      const membership = folderId ?? ""
+      // With a folder filter active, a lead moved elsewhere no longer belongs
+      // on screen. Leaving it there would show it under a folder it isn't in.
+      const dropped = filter.folderId !== null && membership !== filter.folderId
+
+      setLeads((cur) =>
+        dropped
+          ? cur.filter((l) => l.id !== leadId)
+          : cur.map((l) => (l.id === leadId ? { ...l, folder_id: folderId } : l))
+      )
+      // Adjust counts in place rather than refetching: a refetch would reset
+      // pagination and throw away every "load more" page the user has opened.
+      setFolders((cur) =>
+        cur.map((f) => ({
+          ...f,
+          lead_count:
+            f.lead_count + (f.id === folderId ? 1 : 0) - (f.id === oldFolderId ? 1 : 0),
+        }))
+      )
+
+      assignFolder(leadId, folderId).catch((err: unknown) => {
+        // A lead silently sitting in the wrong folder is worse than an error.
+        setLeads(prevLeads)
+        setFolders(prevFolders)
+        setListError(err instanceof Error ? err.message : "Couldn't move that lead")
+      })
+    },
+    [leads, folders, filter.folderId]
+  )
+
   function handleStart(e: FormEvent) {
     e.preventDefault()
     const trimmed = query.trim()
@@ -246,8 +327,13 @@ export default function App() {
   // Keeps the previous rows painted while a new filter's results are in flight.
   const visibleLeads = useDeferredValue(leads)
   const chips = countryChips(targetCountries, visibleLeads)
+  // folderId !== null covers both "unfiled" ("") and a specific folder; an empty
+  // result under either is a filter miss, not an empty inbox.
   const filtersActive =
-    filter.q.length > 0 || filter.countries.length > 0 || filter.status.length > 0
+    filter.q.length > 0 ||
+    filter.countries.length > 0 ||
+    filter.status.length > 0 ||
+    filter.folderId !== null
 
   if (paired === null) {
     return (
@@ -368,7 +454,24 @@ export default function App() {
             countries={chips}
             minScore={sliderValue}
             onMinScoreChange={handleMinScoreChange}
+            folders={folders}
+            onCreateFolder={handleCreateFolder}
+            creatingFolder={creatingFolder}
+            createFolderError={createFolderError}
           />
+
+          {folderNotice && (
+            <p className="text-muted-foreground text-xs">
+              {folderNotice}{" "}
+              <button
+                type="button"
+                onClick={() => setFolderNotice(null)}
+                className="text-primary underline"
+              >
+                Dismiss
+              </button>
+            </p>
+          )}
 
           <LeadList
             leads={visibleLeads}
@@ -382,6 +485,8 @@ export default function App() {
             loadingMore={loadingMore}
             onLoadMore={handleLoadMore}
             filtersActive={filtersActive}
+            folders={folders}
+            onAssignFolder={handleAssignFolder}
           />
 
           <p className="text-muted-foreground border-border mt-auto border-t pt-2 text-xs">

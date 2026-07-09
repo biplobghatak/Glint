@@ -1,5 +1,6 @@
 import { getDeviceToken } from "@/lib/pairing"
 import type { LeadFilter, LeadStatus } from "@/lib/filter"
+import type { FolderRow } from "@/lib/folders"
 
 const env = import.meta.env as unknown as Record<string, string>
 
@@ -14,6 +15,7 @@ export type LeadRow = {
   match_score: number | null
   match_reasons: string[] | null
   status: LeadStatus
+  folder_id: string | null
   created_at: string
 }
 
@@ -32,6 +34,8 @@ export type ListLeadsResponse = {
   min_score: number
   has_icp: boolean
   target_countries: string[]
+  /** Shipped with the leads so the folder <select> fills in one round-trip. */
+  folders: FolderRow[]
 }
 
 export const PAGE_SIZE = 25

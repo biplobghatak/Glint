@@ -1,5 +1,10 @@
 import type { LeadRow as Lead } from "@/lib/leads"
+import type { FolderRow } from "@/lib/folders"
 import { countryLabel } from "@/lib/filter"
+
+// A lead's folder_id is genuinely null when unfiled, and <option value=""> is
+// what the DOM reports for "no value". The sentinel keeps the two apart.
+const UNFILED = "__unfiled"
 
 // Same thresholds the injected LinkedIn badge uses, expressed against the
 // theme's tokens rather than the badge's hardcoded hexes.
@@ -19,7 +24,17 @@ function place(lead: Lead): string | null {
   return lead.country ? countryLabel(lead.country) : null
 }
 
-export function LeadRow({ lead, minScore }: { lead: Lead; minScore: number }) {
+export function LeadRow({
+  lead,
+  minScore,
+  folders,
+  onAssignFolder,
+}: {
+  lead: Lead
+  minScore: number
+  folders: FolderRow[]
+  onAssignFolder: (leadId: string, folderId: string | null) => void
+}) {
   const score = lead.match_score
   const belowThreshold = score !== null && score < minScore
   const sub = subtitle(lead)
@@ -60,6 +75,30 @@ export function LeadRow({ lead, minScore }: { lead: Lead; minScore: number }) {
       {topReason && (
         <p className="text-muted-foreground line-clamp-2 text-xs">{topReason}</p>
       )}
+
+      <div className="flex items-center gap-2">
+        <label htmlFor={`folder-${lead.id}`} className="sr-only">
+          Folder for {lead.name ?? "this lead"}
+        </label>
+        <select
+          id={`folder-${lead.id}`}
+          value={lead.folder_id ?? UNFILED}
+          onChange={(e) =>
+            onAssignFolder(
+              lead.id,
+              e.target.value === UNFILED ? null : e.target.value
+            )
+          }
+          className="border-border bg-card text-muted-foreground focus-visible:ring-ring min-w-0 flex-1 rounded-[var(--radius)] border px-2 py-1 text-xs outline-none focus-visible:ring-2"
+        >
+          <option value={UNFILED}>Unfiled</option>
+          {folders.map((f) => (
+            <option key={f.id} value={f.id}>
+              {f.name}
+            </option>
+          ))}
+        </select>
+      </div>
 
       <div className="text-muted-foreground flex items-center justify-between gap-2 text-xs">
         <span className="truncate">{where ?? "Unknown location"}</span>
