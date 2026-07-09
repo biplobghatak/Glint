@@ -10,21 +10,23 @@ describe("normalizePanelState", () => {
   it("coerces a stored empty-string destination to null", () => {
     expect(
       normalizePanelState({ destination: "", destinationChosen: true, query: "ceo" })
-    ).toEqual({ destination: null, destinationChosen: true, query: "ceo", ownWindow: false })
+    ).toEqual({ destination: null, destinationChosen: true, query: "ceo" })
   })
 
   it("lets a stored uuid destination survive", () => {
     const uuid = "3f9a2b1c-1111-4a2b-9c3d-abcdef123456"
     expect(
       normalizePanelState({ destination: uuid, destinationChosen: true, query: "" })
-    ).toEqual({ destination: uuid, destinationChosen: true, query: "", ownWindow: false })
+    ).toEqual({ destination: uuid, destinationChosen: true, query: "" })
   })
 
-  // A state written before ownWindow existed has no such key, and `undefined`
-  // must read as "run in this tab" — the default the panel ships with.
-  it("defaults ownWindow to false and only accepts a real true", () => {
-    expect(normalizePanelState({ query: "x" }).ownWindow).toBe(false)
-    expect(normalizePanelState({ ownWindow: "yes" }).ownWindow).toBe(false)
-    expect(normalizePanelState({ ownWindow: true }).ownWindow).toBe(true)
+  // A key from a build that has since removed it must not survive into the
+  // normalized shape, or it reappears on the next setPanelState() merge.
+  it("drops keys it does not know about", () => {
+    expect(normalizePanelState({ query: "x", ownWindow: true })).toEqual({
+      destination: null,
+      destinationChosen: false,
+      query: "x",
+    })
   })
 })

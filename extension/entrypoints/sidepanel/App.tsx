@@ -116,9 +116,6 @@ export default function App() {
   const [destination, setDestination] = useState<string | null>(null)
   const [query, setQuery] = useState("")
   const [maxPages, setMaxPages] = useState(DEFAULT_MAX_PAGES)
-  // Run in a window of Glint's own, so the user can keep browsing. See
-  // PanelState.ownWindow for why this is the only way.
-  const [ownWindow, setOwnWindow] = useState(false)
   const [running, setRunning] = useState(false)
   // A paused run is neither running nor gone: it still owns its window, keeps
   // its page and its `seen` set, and resumes without rescoring. The panel must
@@ -232,7 +229,6 @@ export default function App() {
           // nothing filled in.
           setDestination(panel.destination)
           setQuery(panel.query)
-          setOwnWindow(panel.ownWindow)
           setScreen(panel.destinationChosen ? "query" : "folder")
           // Re-scope the list to the folder the user had already chosen. Without
           // this a remount lands on the query screen showing every folder's
@@ -535,11 +531,7 @@ export default function App() {
       query: trimmed,
       maxPages,
       folderId: destination,
-      // Ignored by the background when ownWindow is set; sent unconditionally
-      // because resolving it is cheap and a conditional await reads worse than
-      // an ignored field.
       tabId: await currentTabId(),
-      ownWindow,
     })
   }
 
@@ -778,23 +770,6 @@ export default function App() {
             </div>
             {!running && !paused ? (
               <>
-                {/* The only escape hatch for "let me keep browsing". Chrome
-                    reports a page hidden as soon as its tab stops being its
-                    window's selected tab, so a run in THIS tab pauses the moment
-                    the user switches tabs. The selected tab of an unfocused
-                    window stays visible — hence a window of our own. */}
-                <label className="flex items-center gap-2 text-xs">
-                  <input
-                    type="checkbox"
-                    checked={ownWindow}
-                    onChange={(e) => {
-                      setOwnWindow(e.target.checked)
-                      setPanelState({ ownWindow: e.target.checked })
-                    }}
-                    className="accent-primary"
-                  />
-                  Run in a separate window so I can keep browsing
-                </label>
                 <button
                   type="submit"
                   className="bg-primary text-primary-foreground rounded-[var(--radius)] px-3 py-1.5 text-sm font-medium transition-opacity hover:opacity-90 disabled:opacity-50"
@@ -807,9 +782,8 @@ export default function App() {
                     who does not know where the run lives reads that pause as the
                     extension breaking. */}
                 <p className="text-muted-foreground text-xs">
-                  {ownWindow
-                    ? "Glint opens its own window. Keep it on screen — minimizing or fully covering it pauses the run."
-                    : "Glint runs in this tab. Keep it in front — switching tabs pauses the run."}
+                  Glint runs in this tab. Keep it in front — switching tabs pauses
+                  the run, and coming back resumes it.
                 </p>
               </>
             ) : (

@@ -136,11 +136,7 @@ function pauseMessage(reason: PauseReason): string {
     case "user":
       return "Paused."
     case "hidden":
-      // Deliberately says "page", not "tab" or "window": a run drives whichever
-      // the user chose (PanelState.ownWindow), and RunState does not record
-      // which. Chrome's rule is the same for both — a page it cannot see is a
-      // page it throttles.
-      return "Paused — the Glint page must stay visible. Chrome freezes hidden pages."
+      return "Paused — keep the Glint tab in front. Chrome freezes hidden tabs. It resumes when you come back."
     case "tab_lost":
       return "Paused — the run's tab is gone. Resume to reopen it."
     case "commercial_limit":
@@ -188,11 +184,6 @@ async function openRunWindow(): Promise<{ tabId: number; windowId: number }> {
  * beside it was never the only way to satisfy the visibility requirement, just
  * the first one.
  *
- * `ownWindow` opts back into that window on purpose. It is the ONLY way to keep
- * browsing during a run: a tab that is not its window's selected tab is
- * `hidden`, and a hidden page is throttled past the point where LinkedIn's cards
- * render. The selected tab of an *unfocused* window is still `visible`.
- *
  * The panel's `tabId` is a request, not an instruction: it is re-checked here
  * because the next thing that happens to it is chrome.tabs.update. A tab that
  * closed between the click and this call, or that is not on LinkedIn, silently
@@ -203,10 +194,9 @@ async function openRunWindow(): Promise<{ tabId: number; windowId: number }> {
  * is needed at all.
  */
 async function adoptRunTab(
-  requestedTabId: number | null,
-  ownWindow: boolean
+  requestedTabId: number | null
 ): Promise<{ tabId: number; windowId: number | null; url: string | undefined }> {
-  if (!ownWindow && requestedTabId !== null) {
+  if (requestedTabId !== null) {
     const tab = await chrome.tabs.get(requestedTabId).catch(() => null)
     if (tab?.id !== undefined && !tab.discarded && isLinkedIn(tab.url)) {
       return { tabId: tab.id, windowId: tab.windowId ?? null, url: tab.url }
@@ -220,15 +210,14 @@ async function startRun(
   query: string,
   maxPages: number,
   folderId: string | null,
-  requestedTabId: number | null,
-  ownWindow: boolean
+  requestedTabId: number | null
 ) {
   try {
     const parsed = await parseQuery(query)
     // Pinned once. Switching site in the panel mid-run must not retarget the
     // leads this run is still writing.
     const siteId = await getActiveSiteId()
-    const { tabId, windowId, url } = await adoptRunTab(requestedTabId, ownWindow)
+    const { tabId, windowId, url } = await adoptRunTab(requestedTabId)
 
     // Persist run state *before* navigating — the future content script reads
     // glint_run on load, so it must already be running by the time the tab
@@ -869,13 +858,7 @@ async function handleStartRunMessage(message: StartRunMessage) {
     })
     return
   }
-  await startRun(
-    message.query,
-    message.maxPages,
-    message.folderId,
-    message.tabId,
-    message.ownWindow
-  )
+  await startRun(message.query, message.maxPages, message.folderId, message.tabId)
 }
 
 export default defineBackground(() => {

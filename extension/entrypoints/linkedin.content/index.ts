@@ -752,21 +752,34 @@ export default defineContentScript({
     }
 
     /**
-     * True when this tab is currently showing the page the run expects.
+     * May this tab drive the run right now?
      *
-     * A run adopts the LinkedIn tab the user is already on, so glint_run gets
-     * written into a tab whose content script is ALREADY LIVE and sitting on
-     * some other page — the feed, a profile, a different search. That write
-     * reaches this script through storage.onChanged, well before the background
-     * has navigated anywhere. Driving then would scan whatever is on screen: on
-     * the feed that stops the run with "couldn't find result cards", and on
-     * another query's results it would score the wrong people entirely.
+     * There are two ways to arrive here and they need different answers.
      *
-     * So the run's own tab still waits its turn. The navigation that is coming
-     * reloads this script, and the fresh one finds itself on the run's page.
+     * `strict` — a storage.onChanged event in an ALREADY-LIVE script. A run
+     * adopts the tab the user is on, so glint_run lands in a script sitting on
+     * the feed, a profile, or somebody else's search, well before the background
+     * has navigated anywhere. Driving then would scan whatever is on screen. So
+     * this path demands the exact page the run expects, and otherwise waits for
+     * the navigation that is coming.
+     *
+     * Not strict — a script that has just STARTED. It is, by construction, on
+     * the URL the background navigated it to; there is no earlier page for it to
+     * mistake. Demanding a URL match here would be a hard dependency on LinkedIn
+     * never rewriting a search URL, and that assumption is unverified. When it
+     * failed, the script silently declined to drive and the run sat at `running`
+     * with nothing happening. A results page is enough.
      */
-    function onRunPage(state: RunState | undefined | null): boolean {
-      return !!state && isRunPage(state.parsed, state.page, location.href)
+    function mayDrive(state: RunState | undefined | null, strict: boolean): boolean {
+      if (!state) return false
+      if (!strict) return isSearchResultsPage()
+      if (isRunPage(state.parsed, state.page, location.href)) return true
+      // The one line that turns "Glint stopped working" into a bug report.
+      console.debug(
+        "Glint: not driving yet — waiting for the run's page.",
+        { expected: buildSearchUrl(state.parsed, state.page), actual: location.href }
+      )
+      return false
     }
 
     /**
@@ -776,16 +789,15 @@ export default defineContentScript({
      * same page, and `seen` makes that idempotent — every card already scored is
      * skipped, and the walk picks up at the first one that wasn't.
      *
-     * Both callers set `latestRunState` before calling, so the run-page gate
-     * lives here rather than being repeated (and eventually forgotten) at each
-     * of them.
+     * Both callers set `latestRunState` before calling, so the gate lives here
+     * rather than being repeated (and eventually forgotten) at each of them.
      */
-    async function drive() {
+    async function drive(strict: boolean) {
       if (loopRunning || myTabId === null) return
       // Not our page yet. Return *before* loopRunning is set, so the finally
       // block below cannot hand this tab back to passive mode — the run still
       // owns it, and the navigation is still on its way.
-      if (!onRunPage(latestRunState)) return
+      if (!mayDrive(latestRunState, strict)) return
       loopRunning = true
       try {
         const hud = await ensureHud()
@@ -839,7 +851,10 @@ export default defineContentScript({
       // Resumed: pick the page back up. This is what makes a `hidden` pause
       // invisible to the user — they un-cover the window, the background flips
       // the status, and this listener re-drives the very card we left off on.
-      if (newState?.status === "running") void drive()
+      //
+      // Strict: this script may still be on the page the user was reading when
+      // the run adopted their tab.
+      if (newState?.status === "running") void drive(true)
       else hudHandle?.hud.update({ status: "Paused" })
     })
 
@@ -885,7 +900,9 @@ export default defineContentScript({
         return
       }
       if (effectiveState?.status === "running") {
-        void drive()
+        // Not strict: this script just loaded, so it is already on whatever page
+        // the background sent it to. See mayDrive().
+        void drive(false)
         return
       }
       // A paused run whose tab was just reopened. Show the HUD rather than a

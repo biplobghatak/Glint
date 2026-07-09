@@ -16,16 +16,8 @@ export type StartRunMessage = {
    * and is on LinkedIn before adopting it, and opens its own window if not — it
    * is about to hand this id to chrome.tabs.update, and a navigation primitive
    * does not take a tab id on trust.
-   *
-   * Ignored entirely when `ownWindow` is true.
    */
   tabId: number | null
-  /**
-   * Drive a window of Glint's own instead of `tabId`. The user's escape hatch
-   * for "I want to keep browsing while it runs": a hidden tab is throttled, but
-   * the selected tab of an unfocused window is not. See PanelState.ownWindow.
-   */
-  ownWindow: boolean
 }
 export type StopRunMessage = { type: "STOP_RUN" }
 // A run halts for four reasons and only one of them is a stop. Pause keeps
