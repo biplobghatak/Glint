@@ -49,7 +49,7 @@ Deno.serve(async (req: Request) => {
 
   const { data: pairing } = await supabase
     .from("extension_pairings")
-    .select("user_id")
+    .select("user_id, site_id")
     .eq("device_token", device_token)
     .maybeSingle()
 
@@ -67,7 +67,7 @@ Deno.serve(async (req: Request) => {
   const { data: updated, error } = await supabase
     .from("icps")
     .update({ min_score: clamped })
-    .eq("user_id", pairing.user_id)
+    .eq("site_id", pairing.site_id)
     .select("min_score")
     .maybeSingle()
 

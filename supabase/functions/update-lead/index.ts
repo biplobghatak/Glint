@@ -100,7 +100,7 @@ Deno.serve(async (req: Request) => {
 
   const { data: pairing } = await supabase
     .from("extension_pairings")
-    .select("user_id")
+    .select("user_id, site_id")
     .eq("device_token", device_token)
     .maybeSingle()
 
@@ -111,17 +111,19 @@ Deno.serve(async (req: Request) => {
     })
   }
   const user_id = pairing.user_id
+  const site_id = pairing.site_id
 
-  // Authorization check 2 of 2: the target folder must belong to the same user.
+  // Authorization check 2 of 2: the target folder must belong to the same site.
   // Skipped when unfiling, because null names no folder. Without this a caller
-  // could file their own lead into another user's folder id — the FK would
-  // accept it and RLS, bypassed by the service role, would not object.
+  // could file their own lead into another site's folder id — the FK would
+  // accept it and RLS, bypassed by the service role, would not object. Scoping
+  // to site_id rather than user_id also separates the caller's own websites.
   if (!unfiling && typeof update.folder_id === "string") {
     const { data: folder } = await supabase
       .from("folders")
       .select("id")
       .eq("id", update.folder_id)
-      .eq("user_id", user_id)
+      .eq("site_id", site_id)
       .maybeSingle()
 
     if (!folder) {
@@ -132,15 +134,15 @@ Deno.serve(async (req: Request) => {
     }
   }
 
-  // Authorization check 1 of 2: the lead must belong to the resolved user.
+  // Authorization check 1 of 2: the lead must belong to the resolved site.
   // Expressed as a predicate on the UPDATE rather than a prior SELECT, so the
   // check and the write cannot race. No matched row means the lead is missing
-  // or someone else's — the caller learns nothing about which.
+  // or another site's — the caller learns nothing about which.
   const { data: updated, error } = await supabase
     .from("leads")
     .update(update)
     .eq("id", lead_id)
-    .eq("user_id", user_id)
+    .eq("site_id", site_id)
     .select("id")
     .maybeSingle()
 

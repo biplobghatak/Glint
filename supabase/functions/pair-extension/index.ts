@@ -43,7 +43,7 @@ Deno.serve(async (req: Request) => {
 
   const { data: row } = await admin
     .from("extension_pairings")
-    .select("id, expires_at, paired_at")
+    .select("id, expires_at, paired_at, site_id")
     .eq("pairing_code", code)
     .maybeSingle()
 
@@ -71,5 +71,18 @@ Deno.serve(async (req: Request) => {
     })
   }
 
-  return new Response(JSON.stringify({ device_token }), { headers: jsonHeaders })
+  // The panel keys its token map by site, and labels the switcher with the name.
+  // Fetched separately rather than embedded: `sites` is reached through a
+  // COMPOSITE foreign key (site_id, user_id), which PostgREST will not resolve
+  // as an embed.
+  const { data: site } = await admin
+    .from("sites")
+    .select("id, name, website_url")
+    .eq("id", row.site_id)
+    .maybeSingle()
+
+  // `device_token` stays top-level: older panels read exactly that field.
+  return new Response(JSON.stringify({ device_token, site }), {
+    headers: jsonHeaders,
+  })
 })

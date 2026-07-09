@@ -60,7 +60,7 @@ Deno.serve(async (req: Request) => {
   // Fails closed: a revoked pairing has no row, so it reads nothing.
   const { data: pairing } = await supabase
     .from("extension_pairings")
-    .select("user_id")
+    .select("user_id, site_id")
     .eq("device_token", device_token)
     .maybeSingle()
 
@@ -71,6 +71,7 @@ Deno.serve(async (req: Request) => {
     })
   }
   const user_id = pairing.user_id
+  const site_id = pairing.site_id
 
   if (action === "create") {
     const name = typeof body.name === "string" ? body.name.trim() : ""
@@ -87,7 +88,7 @@ Deno.serve(async (req: Request) => {
       )
     }
 
-    const { error } = await supabase.from("folders").insert({ user_id, name })
+    const { error } = await supabase.from("folders").insert({ user_id, site_id, name })
 
     if (error) {
       if (error.code === UNIQUE_VIOLATION) {
@@ -106,7 +107,7 @@ Deno.serve(async (req: Request) => {
   // Both actions answer with the full post-mutation list, so the panel never has
   // to merge a newly created folder into its own state by hand.
   const { data, error: listError } = await supabase.rpc("folders_with_counts", {
-    p_user_id: user_id,
+    p_site_id: site_id,
   })
 
   if (listError) {

@@ -2,7 +2,7 @@ import { createClient } from "jsr:@supabase/supabase-js@2"
 
 // Writes profile enrichment (avatar, email, phone) onto an existing lead.
 // Mirrors update-lead's auth and ownership scoping: this function runs as the
-// service role, which bypasses RLS entirely, so the `.eq("user_id", user_id)`
+// service role, which bypasses RLS entirely, so the `.eq("site_id", site_id)`
 // on the UPDATE below is the ONLY barrier stopping a leaked device_token from
 // writing enrichment onto a stranger's lead. A lead that exists but belongs to
 // someone else must be indistinguishable from one that does not exist.
@@ -104,7 +104,7 @@ export async function handler(req: Request): Promise<Response> {
 
   const { data: pairing } = await supabase
     .from("extension_pairings")
-    .select("user_id")
+    .select("user_id, site_id")
     .eq("device_token", device_token)
     .maybeSingle()
 
@@ -115,6 +115,7 @@ export async function handler(req: Request): Promise<Response> {
     })
   }
   const user_id = pairing.user_id
+  const site_id = pairing.site_id
 
   // Authorization check: the lead must belong to the resolved user. Expressed
   // as a predicate on the UPDATE rather than a prior SELECT, so the check and
@@ -124,7 +125,7 @@ export async function handler(req: Request): Promise<Response> {
     .from("leads")
     .update(update)
     .eq("id", lead_id)
-    .eq("user_id", user_id)
+    .eq("site_id", site_id)
     .select("id")
     .maybeSingle()
 

@@ -29,7 +29,7 @@ function stubScoreLeadBackend(opts: {
   minScore: number
   llmScore?: number
   existingLead?: Existing | null
-  folder?: { id: string; user_id: string } | null
+  folder?: { id: string; site_id: string } | null
 }): () => void {
   insertedRows = []
   Deno.env.set("SUPABASE_URL", "http://db.test")
@@ -42,7 +42,7 @@ function stubScoreLeadBackend(opts: {
     const method = init?.method ?? "GET"
 
     if (url.includes("/rest/v1/extension_pairings")) {
-      return json([{ user_id: "u1" }])
+      return json([{ user_id: "u1", site_id: "s1" }])
     }
     if (url.includes("/rest/v1/folders")) {
       return json(opts.folder ? [opts.folder] : [])
@@ -149,13 +149,26 @@ Deno.test("folder_id belonging to the caller is written onto the lead", async ()
   const restore = stubScoreLeadBackend({
     minScore: 70,
     llmScore: 90,
-    folder: { id: "f1", user_id: "u1" },
+    folder: { id: "f1", site_id: "s1" },
   })
   const res = await handler(
     makeReq({ device_token: "t", profile_data: { name: "A" }, folder_id: "f1" })
   )
   assertEquals(res.status, 200)
   assertEquals((insertedRows[0] as Record<string, unknown>).folder_id, "f1")
+  restore()
+})
+
+// The pairing's site — never a client-supplied one — decides where a lead lands.
+// A lead written without site_id would violate the NOT NULL, and a lead written
+// with the wrong one would surface in the wrong website's inbox.
+Deno.test("the lead is stamped with the pairing's site_id", async () => {
+  const restore = stubScoreLeadBackend({ minScore: 70, llmScore: 90 })
+  const res = await handler(
+    makeReq({ device_token: "t", profile_data: { name: "A" } })
+  )
+  assertEquals(res.status, 200)
+  assertEquals((insertedRows[0] as Record<string, unknown>).site_id, "s1")
   restore()
 })
 
@@ -186,7 +199,7 @@ Deno.test("the dedupe branch does not move an existing lead into the run's folde
   const restore = stubScoreLeadBackend({
     minScore: 70,
     existingLead: { id: "l1", match_score: 90, match_reasons: ["r"] },
-    folder: { id: "f1", user_id: "u1" },
+    folder: { id: "f1", site_id: "s1" },
   })
   const res = await handler(
     makeReq({
@@ -232,7 +245,7 @@ function stubBatchBackend(opts: {
   minScore: number
   scores?: BatchScoreItem[]
   existingLeads?: ExistingLead[]
-  folder?: { id: string; user_id: string } | null
+  folder?: { id: string; site_id: string } | null
 }): () => void {
   insertedRows = []
   llmCallCount = 0
@@ -247,7 +260,7 @@ function stubBatchBackend(opts: {
     const method = init?.method ?? "GET"
 
     if (url.includes("/rest/v1/extension_pairings")) {
-      return json([{ user_id: "u1" }])
+      return json([{ user_id: "u1", site_id: "s1" }])
     }
     if (url.includes("/rest/v1/folders")) {
       return json(opts.folder ? [opts.folder] : [])
@@ -424,7 +437,7 @@ Deno.test("batch folder_id the caller does not own is rejected, nothing inserted
 Deno.test("batch dedupe hit is not relocated into the run's folder", async () => {
   const restore = stubBatchBackend({
     minScore: 70,
-    folder: { id: "f1", user_id: "u1" },
+    folder: { id: "f1", site_id: "s1" },
     existingLeads: [
       { id: "l1", linkedin_url: "https://li/a", match_score: 90, match_reasons: ["r"] },
     ],

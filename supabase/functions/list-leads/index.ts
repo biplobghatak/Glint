@@ -166,7 +166,7 @@ Deno.serve(async (req: Request) => {
   // Fails closed: a revoked pairing has no row, so it reads nothing.
   const { data: pairing } = await supabase
     .from("extension_pairings")
-    .select("user_id")
+    .select("user_id, site_id")
     .eq("device_token", device_token)
     .maybeSingle()
 
@@ -177,11 +177,12 @@ Deno.serve(async (req: Request) => {
     })
   }
   const user_id = pairing.user_id
+  const site_id = pairing.site_id
 
   const { data: icp } = await supabase
     .from("icps")
     .select("min_score, target_countries")
-    .eq("user_id", user_id)
+    .eq("site_id", site_id)
     .maybeSingle()
 
   const has_icp = !!icp
@@ -219,7 +220,7 @@ Deno.serve(async (req: Request) => {
   // supabase-js's filter methods all return `this`, so a structural bound on
   // just the four we use types this helper without a cast at either call site.
   const applyCommonFilters = <T extends CommonFilters<T>>(builder: T): T => {
-    let b = builder.eq("user_id", user_id)
+    let b = builder.eq("site_id", site_id)
 
     if (q) {
       const v = quoteValue(q)
@@ -308,7 +309,7 @@ Deno.serve(async (req: Request) => {
   // deleted elsewhere, instead of rendering an empty list that reads as
   // "no leads match".
   const { data: folderRows } = await supabase.rpc("folders_with_counts", {
-    p_user_id: user_id,
+    p_site_id: site_id,
   })
   const folders: FolderRow[] = (folderRows ?? []).map(
     (f: { id: string; name: string; lead_count: number | string }) => ({

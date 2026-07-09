@@ -58,13 +58,11 @@ function SidebarNav({ onNavigate }: { onNavigate?: () => void }) {
 
 function Sidebar() {
   return (
-    <aside className="hidden h-full shrink-0 p-3 md:block">
-      <div className="flex h-full w-56 flex-col gap-6 overflow-y-auto rounded-2xl border border-sidebar-border bg-sidebar p-4">
-        <Link href="/dashboard" className="text-lg font-bold tracking-tight">
-          Glint<span className="text-primary">.</span>
-        </Link>
-        <SidebarNav />
-      </div>
+    <aside className="border-sidebar-border bg-sidebar hidden h-full w-56 shrink-0 flex-col gap-6 overflow-y-auto border-r p-4 md:flex">
+      <Link href="/dashboard" className="text-lg font-bold tracking-tight">
+        Glint<span className="text-primary">.</span>
+      </Link>
+      <SidebarNav />
     </aside>
   )
 }

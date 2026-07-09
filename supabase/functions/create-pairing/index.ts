@@ -48,11 +48,51 @@ Deno.serve(async (req: Request) => {
     Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
   )
 
+  // A pairing code is minted for one SITE. The resulting device_token is what
+  // every other function resolves a site from, so a site_id from the request
+  // body is untrusted until it is proven to belong to this JWT's user.
+  let requested_site_id: string | undefined
+  try {
+    const body = await req.json()
+    requested_site_id = body?.site_id
+  } catch {
+    // No body. Callers that predate multi-site send none; fall through to the
+    // single-site default below.
+  }
+
+  const { data: sites } = await admin
+    .from("sites")
+    .select("id")
+    .eq("user_id", user.id)
+
+  const owned = (sites ?? []).map((s) => s.id as string)
+
+  if (requested_site_id && !owned.includes(requested_site_id)) {
+    // Indistinguishable from a site that does not exist.
+    return new Response(JSON.stringify({ error: "site_not_found" }), {
+      status: 404,
+      headers: jsonHeaders,
+    })
+  }
+
+  // Omitting site_id is only unambiguous when the user has exactly one site.
+  // That keeps every pre-multi-site caller working, and refuses to guess once
+  // a second website exists rather than silently pairing to the wrong one.
+  const site_id = requested_site_id ?? (owned.length === 1 ? owned[0] : undefined)
+
+  if (!site_id) {
+    return new Response(
+      JSON.stringify({ error: owned.length === 0 ? "no_site" : "site_required" }),
+      { status: 400, headers: jsonHeaders }
+    )
+  }
+
   const pairing_code = makeCode()
   const expires_at = new Date(Date.now() + TTL_MS).toISOString()
 
   const { error } = await admin.from("extension_pairings").insert({
     user_id: user.id,
+    site_id,
     pairing_code,
     expires_at,
   })
@@ -64,7 +104,7 @@ Deno.serve(async (req: Request) => {
     })
   }
 
-  return new Response(JSON.stringify({ pairing_code, expires_at }), {
+  return new Response(JSON.stringify({ pairing_code, expires_at, site_id }), {
     headers: jsonHeaders,
   })
 })

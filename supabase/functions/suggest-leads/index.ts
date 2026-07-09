@@ -60,7 +60,7 @@ Deno.serve(async (req: Request) => {
 
   const { data: pairing } = await supabase
     .from("extension_pairings")
-    .select("user_id")
+    .select("user_id, site_id")
     .eq("device_token", device_token)
     .maybeSingle()
 
@@ -71,11 +71,12 @@ Deno.serve(async (req: Request) => {
     })
   }
   const user_id = pairing.user_id
+  const site_id = pairing.site_id
 
   const { data: icp } = await supabase
     .from("icps")
     .select("min_score, target_countries")
-    .eq("user_id", user_id)
+    .eq("site_id", site_id)
     .maybeSingle()
 
   // No ICP yet is an ordinary state for a freshly paired user, not an error.
@@ -91,7 +92,7 @@ Deno.serve(async (req: Request) => {
   let query = supabase
     .from("leads")
     .select("id, name, company, role, linkedin_url, match_score, match_reasons")
-    .eq("user_id", user_id)
+    .eq("site_id", site_id)
     .eq("status", "new")
     // Untriaged, in both senses: not yet contacted, and not yet filed. Filing a
     // lead into a folder is the user acting on it, so it stops being something

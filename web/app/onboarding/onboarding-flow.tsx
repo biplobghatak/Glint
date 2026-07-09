@@ -61,6 +61,16 @@ function toArray(value: string): string[] {
     .filter(Boolean)
 }
 
+// "https://outpulse.app/pricing" -> "outpulse.app". Falls back to the raw string
+// when it will not parse, because a site still needs a label in the switcher.
+function siteName(websiteUrl: string): string {
+  try {
+    return new URL(websiteUrl).hostname.replace(/^www\./, "") || websiteUrl
+  } catch {
+    return websiteUrl
+  }
+}
+
 export function OnboardingFlow({ userId }: { userId: string }) {
   const router = useRouter()
   const supabase = createClient()
@@ -120,16 +130,64 @@ export function OnboardingFlow({ userId }: { userId: string }) {
     setStep("review")
   }
 
+  // An ICP belongs to a site, so onboarding must land a site first. Returns the
+  // site's id, reusing one when this user already has it.
+  async function ensureSite(): Promise<string | null> {
+    const { data: sites, error: listError } = await supabase
+      .from("sites")
+      .select("id, website_url")
+      .eq("user_id", userId)
+
+    if (listError) return null
+
+    const same = (sites ?? []).find(
+      (s) => s.website_url.toLowerCase() === websiteUrl.toLowerCase()
+    )
+    if (same) return same.id
+
+    // The sites migration parks a placeholder site on users who paired the
+    // extension before they ever onboarded. Adopt it rather than leaving an
+    // empty "Untitled site" beside the real one.
+    const placeholder = (sites ?? []).find((s) => s.website_url === "")
+    if (placeholder) {
+      const { error: adoptError } = await supabase
+        .from("sites")
+        .update({ name: siteName(websiteUrl), website_url: websiteUrl })
+        .eq("id", placeholder.id)
+      return adoptError ? null : placeholder.id
+    }
+
+    const { data: created, error: createError } = await supabase
+      .from("sites")
+      .insert({
+        user_id: userId,
+        name: siteName(websiteUrl),
+        website_url: websiteUrl,
+      })
+      .select("id")
+      .single()
+
+    return createError ? null : created.id
+  }
+
   async function handleSave(e: FormEvent) {
     e.preventDefault()
     setLoading(true)
     setError(null)
 
-    // icps.user_id is unique — one row per user — so re-running onboarding
-    // UPDATEs the existing row rather than inserting a second one.
+    const siteId = await ensureSite()
+    if (!siteId) {
+      setLoading(false)
+      setError("Couldn't save your website. Try again.")
+      return
+    }
+
+    // icps.site_id is unique — one profile per site — so re-running onboarding
+    // for the same website UPDATEs that site's row rather than inserting a
+    // second one. (It was unique on user_id before sites existed.)
     //
     // Enumerate columns, and never list min_score here. PostgREST turns this
-    // payload into `on conflict (user_id) do update set <the keys below>`, so
+    // payload into `on conflict (site_id) do update set <the keys below>`, so
     // any column named here is overwritten and any column omitted survives.
     // Adding min_score (or spreading a whole ICP object) would silently reset
     // the user's score threshold to the column default every time they redo
@@ -137,6 +195,7 @@ export function OnboardingFlow({ userId }: { userId: string }) {
     const { error: saveError } = await supabase.from("icps").upsert(
       {
         user_id: userId,
+        site_id: siteId,
         website_url: websiteUrl,
         target_roles: toArray(icp.target_roles),
         company_types: toArray(icp.company_types),
@@ -144,7 +203,7 @@ export function OnboardingFlow({ userId }: { userId: string }) {
         raw_summary: icp.raw_summary,
         target_countries: icp.target_countries,
       },
-      { onConflict: "user_id" }
+      { onConflict: "site_id" }
     )
     setLoading(false)
 

@@ -208,9 +208,12 @@ async function handleBatch(
     Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
   )
 
+  // The token identifies a SITE, not just a user. Everything below is scoped by
+  // site_id, so a token minted for one website can never read or write another's
+  // leads even though both belong to the same person.
   const { data: pairing } = await supabase
     .from("extension_pairings")
-    .select("user_id")
+    .select("user_id, site_id")
     .eq("device_token", device_token)
     .maybeSingle()
 
@@ -221,17 +224,19 @@ async function handleBatch(
     })
   }
   const user_id = pairing.user_id
+  const site_id = pairing.site_id
 
   // The device_token is a bearer credential and score-lead runs with the
   // service-role key (RLS bypassed), so this filter is the ONLY barrier stopping
-  // a leaked token from writing into a stranger's folder. Validate before any
-  // expensive work, exactly as the single-profile path does.
+  // a leaked token from writing into a stranger's folder. Scoping to site_id
+  // rather than user_id also stops a token for one of the caller's OWN sites
+  // from filing into another of them. Validate before any expensive work.
   if (folder_id) {
     const { data: folder } = await supabase
       .from("folders")
       .select("id")
       .eq("id", folder_id)
-      .eq("user_id", user_id)
+      .eq("site_id", site_id)
       .maybeSingle()
     if (!folder) {
       return new Response(JSON.stringify({ error: "invalid_folder" }), {
@@ -255,7 +260,7 @@ async function handleBatch(
     const { data: existingLeads } = await supabase
       .from("leads")
       .select("id, linkedin_url, match_score, match_reasons")
-      .eq("user_id", user_id)
+      .eq("site_id", site_id)
       .in("linkedin_url", urls)
     for (const row of existingLeads ?? []) {
       dedupeByUrl.set(row.linkedin_url, row)
@@ -266,7 +271,7 @@ async function handleBatch(
   const { data: icp, error: icpError } = await supabase
     .from("icps")
     .select("target_roles, company_types, pain_points, raw_summary, min_score")
-    .eq("user_id", user_id)
+    .eq("site_id", site_id)
     .maybeSingle()
 
   if (icpError) {
@@ -379,6 +384,7 @@ async function handleBatch(
     toInsert.push({
       row: {
         user_id,
+        site_id,
         name: profile.name ?? null,
         company: profile.company ?? null,
         role: profile.headline ?? null,
@@ -468,7 +474,7 @@ export async function handler(req: Request): Promise<Response> {
 
   const { data: pairing } = await supabase
     .from("extension_pairings")
-    .select("user_id")
+    .select("user_id, site_id")
     .eq("device_token", device_token)
     .maybeSingle()
 
@@ -479,16 +485,18 @@ export async function handler(req: Request): Promise<Response> {
     })
   }
   const user_id = pairing.user_id
+  const site_id = pairing.site_id
 
   // A device_token is a bearer credential, so every id it carries is untrusted.
-  // Scope the lookup to this pairing's user_id: a folder that exists but belongs
-  // to someone else must be indistinguishable from one that does not exist.
+  // Scope the lookup to this pairing's site_id: a folder that exists but belongs
+  // to another site — even one of the caller's own — must be indistinguishable
+  // from one that does not exist.
   if (folder_id) {
     const { data: folder } = await supabase
       .from("folders")
       .select("id")
       .eq("id", folder_id)
-      .eq("user_id", user_id)
+      .eq("site_id", site_id)
       .maybeSingle()
     if (!folder) {
       return new Response(JSON.stringify({ error: "invalid_folder" }), {
@@ -499,10 +507,12 @@ export async function handler(req: Request): Promise<Response> {
   }
 
   if (profile_data.linkedin_url) {
+    // Dedupe is per site: the same person may legitimately be a lead for two
+    // different products, scored differently against each ICP.
     const { data: existing } = await supabase
       .from("leads")
       .select("id, match_score, match_reasons")
-      .eq("user_id", user_id)
+      .eq("site_id", site_id)
       .eq("linkedin_url", profile_data.linkedin_url)
       .maybeSingle()
 
@@ -520,7 +530,7 @@ export async function handler(req: Request): Promise<Response> {
       const { data: icpRow } = await supabase
         .from("icps")
         .select("min_score")
-        .eq("user_id", user_id)
+        .eq("site_id", site_id)
         .maybeSingle()
 
       return new Response(
@@ -545,7 +555,7 @@ export async function handler(req: Request): Promise<Response> {
   const { data: icp, error: icpError } = await supabase
     .from("icps")
     .select("target_roles, company_types, pain_points, raw_summary, min_score")
-    .eq("user_id", user_id)
+    .eq("site_id", site_id)
     .maybeSingle()
 
   if (icpError) {
@@ -600,6 +610,7 @@ export async function handler(req: Request): Promise<Response> {
     .from("leads")
     .insert({
       user_id,
+      site_id,
       name: profile_data.name ?? null,
       company: profile_data.company ?? null,
       role: profile_data.headline ?? null,

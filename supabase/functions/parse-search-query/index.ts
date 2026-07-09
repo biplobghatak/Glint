@@ -84,7 +84,7 @@ Deno.serve(async (req: Request) => {
 
   const { data: pairing } = await supabase
     .from("extension_pairings")
-    .select("user_id")
+    .select("user_id, site_id")
     .eq("device_token", device_token)
     .maybeSingle()
 
@@ -95,11 +95,12 @@ Deno.serve(async (req: Request) => {
     })
   }
   const user_id = pairing.user_id
+  const site_id = pairing.site_id
 
   const { data: icp, error: icpError } = await supabase
     .from("icps")
     .select("target_roles, company_types, pain_points, raw_summary")
-    .eq("user_id", user_id)
+    .eq("site_id", site_id)
     .maybeSingle()
 
   if (icpError) {
