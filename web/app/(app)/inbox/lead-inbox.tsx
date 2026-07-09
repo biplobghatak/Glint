@@ -18,6 +18,7 @@ import {
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet"
 import { PageHeader } from "@/components/app-shell/page-header"
 import { FolderRail, type Folder, type FolderId } from "@/components/inbox/folder-rail"
+import { formatScoreOrDash } from "@/lib/format"
 
 export type Lead = {
   id: string
@@ -37,11 +38,13 @@ type ScoreBucket = "high" | "medium" | "low"
 type ScoreFilter = "all" | ScoreBucket
 type SortKey = "score_desc" | "score_asc" | "newest" | "oldest"
 
+// Labels are on the user's 0-10 scale; scoreBucket() below still compares against
+// the 0-100 scale the score is stored on. Only the text changes.
 const SCORE_FILTERS: { key: ScoreFilter; label: string }[] = [
   { key: "all", label: "All" },
-  { key: "high", label: "≥ 80" },
-  { key: "medium", label: "50–79" },
-  { key: "low", label: "< 50" },
+  { key: "high", label: "≥ 8.0" },
+  { key: "medium", label: "5.0–7.9" },
+  { key: "low", label: "< 5.0" },
 ]
 
 const SORT_OPTIONS: { key: SortKey; label: string }[] = [
@@ -502,7 +505,7 @@ export function LeadInbox({
                             </p>
                           </div>
                           <Badge variant={scoreVariant(lead.match_score)}>
-                            {lead.match_score ?? "—"}
+                            {formatScoreOrDash(lead.match_score)}
                           </Badge>
                         </div>
 

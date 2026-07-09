@@ -8,6 +8,7 @@ import {
   CardTitle,
 } from "@/components/ui/card"
 import { PageHeader } from "@/components/app-shell/page-header"
+import { formatScoreOrDash } from "@/lib/format"
 
 export type DashboardData = {
   totalLeads: number
@@ -106,10 +107,7 @@ export function DashboardView({ data }: { data: DashboardData }) {
           <StatCard label="Total leads" value={String(data.totalLeads)} />
           <StatCard label="New" value={String(data.newLeads)} />
           <StatCard label="Contacted" value={String(data.contactedLeads)} />
-          <StatCard
-            label="Avg match score"
-            value={data.avgScore !== null ? String(data.avgScore) : "—"}
-          />
+          <StatCard label="Avg match score" value={formatScoreOrDash(data.avgScore)} />
         </div>
 
         <div className="grid gap-4 lg:grid-cols-2">
@@ -136,7 +134,7 @@ export function DashboardView({ data }: { data: DashboardData }) {
                         {[lead.role, lead.company].filter(Boolean).join(" · ")}
                       </p>
                     </div>
-                    <Badge variant="outline">{lead.match_score ?? "—"}</Badge>
+                    <Badge variant="outline">{formatScoreOrDash(lead.match_score)}</Badge>
                   </div>
                 ))
               )}
