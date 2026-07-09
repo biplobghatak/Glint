@@ -22,6 +22,7 @@ export default function App() {
         setRunning(true)
         setQuery(run.query)
         setLeadCount(run.leadCount)
+        setStatus("Run in progress…")
       }
       setPaired(token !== null)
     })
@@ -68,9 +69,20 @@ export default function App() {
     <div className="flex h-full flex-col gap-4 p-4">
       <h1 className="text-base font-semibold">Glint</h1>
       {!paired ? (
-        <p className="text-muted-foreground text-sm">
-          Open the Glint extension icon popup to pair with your account first.
-        </p>
+        <>
+          <p className="text-muted-foreground text-sm">
+            Open the Glint extension icon popup to pair with your account first.
+          </p>
+          {running && (
+            <button
+              type="button"
+              onClick={handleStop}
+              className="rounded-md border px-3 py-1.5 text-sm"
+            >
+              Stop
+            </button>
+          )}
+        </>
       ) : (
         <>
           <form onSubmit={handleStart} className="flex flex-col gap-2">

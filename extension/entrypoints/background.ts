@@ -1,5 +1,5 @@
 import { isLinkedIn } from "@/lib/linkedin"
-import { parseQuery, buildSearchUrl, UnpairedError, NoIcpError, QueryServiceError } from "@/lib/query"
+import { parseQuery, buildSearchUrl, UnpairedError, NoIcpError, QueryServiceError, NetworkError } from "@/lib/query"
 import { getRunState, setRunState, clearRunState } from "@/lib/run"
 import type { RuntimeMessage } from "@/lib/messages"
 
@@ -49,13 +49,20 @@ async function startRun(query: string, tabId: number) {
       await chrome.tabs.update(tabId, { url })
     } catch (navErr) {
       // Navigation failed after we already marked the run active — don't
-      // strand glint_run at active:true with nothing driving it.
-      await clearRunState()
+      // strand glint_run at active:true with nothing driving it. Cleanup is
+      // wrapped so a rejection here can't mask the real NavigationError with
+      // the generic fallback message below, re-stranding the run.
+      try {
+        await clearRunState()
+      } catch (cleanupErr) {
+        console.error("Glint: clearRunState failed after navigation error", cleanupErr)
+      }
       throw new NavigationError(
         navErr instanceof Error ? navErr.message : "tabs.update failed"
       )
     }
   } catch (err) {
+    console.error("Glint: startRun failed", err)
     const error =
       err instanceof UnpairedError
         ? "Not paired. Open the popup and pair first."
@@ -65,11 +72,37 @@ async function startRun(query: string, tabId: number) {
             ? "Could not open LinkedIn in this tab. Try again."
             : err instanceof QueryServiceError
               ? "Search service is unavailable right now. Try again in a moment."
-              : err instanceof TypeError
+              : err instanceof NetworkError
                 ? "Network error — check your connection and try again."
                 : "Could not parse your request. Try again."
     sendMessage({ type: "RUN_ERROR", error })
   }
+}
+
+// Guards against a second START_RUN clobbering an in-flight run. The
+// side panel's `running` flag can't be trusted for this: it's per-document,
+// and a second window's side panel is an independently mounted document that
+// has no idea another one already has a run active. glint_run is the only
+// shared source of truth, so it's checked here before we ever call startRun.
+async function handleStartRunMessage(query: string) {
+  const state = await getRunState()
+  if (state?.active) {
+    sendMessage({
+      type: "RUN_ERROR",
+      error: "A search is already running. Stop it first.",
+    })
+    return
+  }
+  chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
+    if (tab?.id !== undefined && isLinkedIn(tab.url)) {
+      startRun(query, tab.id)
+    } else {
+      sendMessage({
+        type: "RUN_ERROR",
+        error: "Open a LinkedIn tab to start a search.",
+      })
+    }
+  })
 }
 
 export default defineBackground(() => {
@@ -107,16 +140,7 @@ export default defineBackground(() => {
     // instead of registering a listener that can never receive a message.
     chrome.runtime.onMessage.addListener((message: RuntimeMessage) => {
       if (message.type === "START_RUN") {
-        chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
-          if (tab?.id !== undefined && isLinkedIn(tab.url)) {
-            startRun(message.query, tab.id)
-          } else {
-            sendMessage({
-              type: "RUN_ERROR",
-              error: "Open a LinkedIn tab to start a search.",
-            })
-          }
-        })
+        handleStartRunMessage(message.query)
       } else if (message.type === "STOP_RUN") {
         clearRunState()
       }
