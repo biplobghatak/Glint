@@ -3,8 +3,13 @@ import { extractFromNode, findSearchResultCards, type LeadCandidate } from "@/li
 import { scoreLead } from "@/lib/score"
 import { getRunState, setRunState, clearRunState, type RunState } from "@/lib/run"
 import type { RuntimeMessage, WhichTabMessage, WhichTabResponse } from "@/lib/messages"
+import "./style.css"
 
 const FEED_POST_SELECTOR = 'div.feed-shared-update-v2, [data-urn*="urn:li:activity"]'
+
+// The custom element createShadowRootUi() mounts the draft card into. Named
+// here rather than inlined because isGlintNode() has to recognize it.
+const DRAFT_CARD_TAG = "glint-draft-card"
 
 // UNVERIFIED against live LinkedIn markup — best-effort guesses, tried in
 // order. The first one that matches a non-disabled button wins. If none of
@@ -54,9 +59,21 @@ function clickNextPage(): boolean {
 // MutationObserver below watches document.body with subtree:true, so every
 // badge we prepend re-triggers it, and the scan it schedules prepends more
 // badges. Without this the observer feeds itself.
+// Every element Glint injects into LinkedIn's document. The MutationObserver
+// below watches document.body with subtree:true, so each of these re-triggers
+// the scan that injects them. Without this guard that is a feedback loop —
+// inject, observe, scan, inject — running on someone else's infinite-scroll
+// feed.
+//
+// ANY new injected host must be added here in the same commit that introduces
+// it. Today: score badges, and the draft-opener card's shadow host.
 function isGlintNode(node: Node): boolean {
   if (!(node instanceof Element)) return false
-  return node.classList.contains("glint-badge") || node.closest(".glint-badge") !== null
+  return (
+    node.classList.contains("glint-badge") ||
+    node.tagName.toLowerCase() === DRAFT_CARD_TAG ||
+    node.closest(`.glint-badge, ${DRAFT_CARD_TAG}`) !== null
+  )
 }
 
 function badgeColor(score: number): string {
@@ -341,7 +358,10 @@ async function runAgentLoop(myTabId: number) {
 
 export default defineContentScript({
   matches: ["*://*.linkedin.com/*"],
-  main() {
+  // Required by createShadowRootUi: hands style.css to the draft card's shadow
+  // root instead of injecting it into LinkedIn's document.
+  cssInjectionMode: "ui",
+  main(ctx) {
     // An unpacked extension never auto-updates — Chrome keeps running whatever
     // was loaded last. Print the build stamp so a stale extension announces
     // itself instead of masquerading as a code bug.

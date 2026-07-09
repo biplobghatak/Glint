@@ -1,0 +1,130 @@
+/*
+ * Scoped to Glint's shadow roots inside LinkedIn's page (cssInjectionMode:
+ * "ui"), so none of it reaches LinkedIn's document and none of LinkedIn's
+ * global stylesheet reaches us. That isolation runs both ways and is the whole
+ * reason for the shadow root: an un-encapsulated card would inherit their
+ * typography and their stacking context, and end up restyled or behind the nav.
+ *
+ * Deliberately plain CSS, not Tailwind. Tailwind's preflight assumes it owns
+ * the document root, which is false inside a shadow root.
+ */
+
+:host {
+  /* A subset of styles/theme.css, inlined. A shadow root cannot see the page's
+     custom properties, and the side panel's stylesheet is a separate document.
+     Keep these in sync with styles/theme.css by hand — there are only six. */
+  --glint-bg: oklch(1 0 0);
+  --glint-fg: oklch(0.145 0 0);
+  --glint-muted: oklch(0.556 0 0);
+  --glint-border: oklch(0.922 0 0);
+  --glint-primary: oklch(0.527 0.154 150.069);
+  --glint-primary-fg: oklch(0.982 0.018 155.826);
+
+  all: initial;
+  font: 400 13px/1.5 system-ui, -apple-system, sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :host {
+    --glint-bg: oklch(0.145 0 0);
+    --glint-fg: oklch(0.985 0 0);
+    --glint-muted: oklch(0.708 0 0);
+    --glint-border: oklch(0.269 0 0);
+    --glint-primary: oklch(0.448 0.119 151.328);
+  }
+}
+
+.card {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  /* Above LinkedIn's message overlay and nav. Our own shadow root, so this
+     competes with nothing else of ours. */
+  z-index: 2147483000;
+  width: 320px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  color: var(--glint-fg);
+  background: var(--glint-bg);
+  border: 1px solid var(--glint-border);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 12%);
+}
+
+.head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.title {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.hint,
+.fallback-note {
+  color: var(--glint-muted);
+  font-size: 11px;
+}
+
+.draft {
+  max-height: 220px;
+  overflow-y: auto;
+  padding: 8px 10px;
+  font-size: 13px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: color-mix(in oklch, var(--glint-fg) 4%, transparent);
+  border: 1px solid var(--glint-border);
+  border-radius: 6px;
+}
+
+.actions {
+  display: flex;
+  gap: 8px;
+}
+
+button {
+  flex: 1;
+  padding: 7px 10px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.primary {
+  color: var(--glint-primary-fg);
+  background: var(--glint-primary);
+  border: 1px solid transparent;
+}
+
+.secondary {
+  color: var(--glint-fg);
+  background: transparent;
+  border: 1px solid var(--glint-border);
+}
+
+.secondary:hover,
+.primary:hover {
+  opacity: 0.9;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.close {
+  flex: 0 0 auto;
+  padding: 0 4px;
+  color: var(--glint-muted);
+  background: none;
+  border: 0;
+  font-size: 14px;
+}
