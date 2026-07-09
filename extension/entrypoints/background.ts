@@ -82,6 +82,26 @@ const pendingEnrich = new Map<number, PendingEnrich>()
 // defineBackground closes any orphan a lost mirror would otherwise leave behind.
 const openedTabIdsMirror = new Set<number>()
 
+// Set immediately BEFORE chrome.tabs.create, cleared once that tab is closed.
+// Its only job is to bound the startup sweep: chrome.tabs.create returns the id,
+// so the id cannot be recorded before the tab exists, and a crash in that window
+// leaves an overlay tab nothing tracks. If this key survives a service-worker
+// restart, a lookup was in flight when we died and any overlay tab we find is
+// ours. If it does NOT survive, we were not enriching — and an overlay tab on
+// screen belongs to the user. Sweeping unconditionally would mean the extension
+// closes a tab the user opened by hand.
+const ENRICH_MARK_KEY = "glint_enrich_in_flight"
+
+async function setEnrichMark(inFlight: boolean): Promise<void> {
+  if (inFlight) await chrome.storage.local.set({ [ENRICH_MARK_KEY]: true })
+  else await chrome.storage.local.remove(ENRICH_MARK_KEY)
+}
+
+async function enrichWasInFlight(): Promise<boolean> {
+  const res = await chrome.storage.local.get(ENRICH_MARK_KEY)
+  return res[ENRICH_MARK_KEY] === true
+}
+
 // Records a tab this run opened so endRun() can guarantee it is closed. If the
 // run vanished between opening the tab and this write (a Stop that raced), the
 // tab has no owner that will ever close it — so close it here and now.
@@ -184,16 +204,22 @@ async function handleEnrich(
   // chrome.tabs.create is what MINTS the id, so there is nothing to record until
   // it resolves. The startup contact-info sweep (see defineBackground) closes
   // whatever this unavoidable window strands.
+  // Raised before the tab exists, so it is set for the whole window in which a
+  // crash could strand one. The startup sweep only runs while it is raised.
+  await setEnrichMark(true)
+
   let tab: chrome.tabs.Tab
   try {
     tab = await chrome.tabs.create({ url, active: false })
   } catch (err) {
     console.debug("Glint: enrich tab create failed", err)
+    await setEnrichMark(false)
     sendResponse({ done: true })
     return
   }
   const contactTabId = tab.id
   if (contactTabId === undefined) {
+    await setEnrichMark(false)
     sendResponse({ done: true })
     return
   }
@@ -211,6 +237,8 @@ async function handleEnrich(
     if (enrich) await enrichLead(leadId, email, phone)
     chrome.tabs.remove(contactTabId).catch(() => {})
     await removeOpenedTabId(contactTabId)
+    // The tab is gone, so nothing is strandable until the next create.
+    await setEnrichMark(false)
     sendResponse({ done: true })
   }
   const timer = setTimeout(() => {
@@ -250,6 +278,12 @@ function sweepEnrichTabs(tabIds: Iterable<number>): void {
   const pendings = Array.from(pendingEnrich.values())
   pendingEnrich.clear()
   for (const p of pendings) p.finish(null, null, false)
+  // Every tab this run opened is closed below, so nothing is in flight. Leaving
+  // the mark raised would make the next service-worker start sweep — and close —
+  // a contact-info tab the user had opened for themselves. Not awaited: this
+  // helper is sync (shared with the STOPPED handler), and nothing here depends
+  // on the write landing before the tabs are removed.
+  void setEnrichMark(false)
   for (const id of tabIds) chrome.tabs.remove(id).catch(() => {})
   openedTabIdsMirror.clear()
 }
@@ -323,6 +357,12 @@ async function reconcileRunState(navigatedTabId?: number): Promise<void> {
 // all of them when there is no active run. Runs alongside reconcileRunState().
 async function sweepContactInfoOrphans(): Promise<void> {
   try {
+    // Only sweep when a lookup was actually in flight when we last died.
+    // Without this gate the sweep closes every contact-info overlay tab it can
+    // see whenever no run is active — including one the user opened themselves,
+    // which is the extension reaching in and shutting the user's own tab.
+    if (!(await enrichWasInFlight())) return
+
     const tabs = await chrome.tabs.query({
       url: "*://*.linkedin.com/in/*/overlay/contact-info/*",
     })
@@ -333,6 +373,9 @@ async function sweepContactInfoOrphans(): Promise<void> {
         chrome.tabs.remove(tab.id).catch(() => {})
       }
     }
+    // Nothing is in flight now: either we closed the orphans, or the live run
+    // still owns its tab and will close it through finish()/endRun().
+    if (!state?.active) await setEnrichMark(false)
   } catch (err) {
     console.debug("Glint: contact-info orphan sweep failed", err)
   }
