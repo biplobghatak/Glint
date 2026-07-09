@@ -336,33 +336,54 @@ export default function App() {
   // manage-folders answers with the whole post-mutation list, so there is no
   // local merge to get wrong. Resolves false on failure and the FilterBar keeps
   // what the user typed.
-  const handleCreateFolder = useCallback(async (name: string): Promise<boolean> => {
-    setCreatingFolder(true)
-    setCreateFolderError(null)
-    try {
-      // Snapshot ids before the mutation lands, so the newly created folder can
-      // be told apart from one that happened to share its name (the server
-      // 409s on duplicates, so this should be impossible, but prefer the id
-      // that wasn't already here if it somehow occurs).
-      const priorIds = new Set(folders.map((f) => f.id))
-      const updated = await createFolder(name)
-      setFolders(updated)
-      // The new folder is not selected by default, so without this the user
-      // has to create it and then click it separately.
-      const matches = updated.filter((f) => f.name === name)
-      const created = matches.find((f) => !priorIds.has(f.id)) ?? matches.at(-1)
-      if (created) setDestination(created.id)
-      return true
-    } catch (err: unknown) {
-      // A 409 carries the server's "A folder named X already exists".
-      setCreateFolderError(
-        err instanceof Error ? err.message : "Couldn't create that folder"
-      )
-      return false
-    } finally {
-      setCreatingFolder(false)
-    }
-  }, [folders])
+  /**
+   * `selectAsDestination` is what keeps the panel's two folder vocabularies
+   * apart. Creating a folder from the picker is the user choosing where THIS RUN
+   * writes, so the new folder becomes the destination. Creating one from the
+   * FilterBar is the user organising the lead list they are reading, and must
+   * not silently retarget the next run.
+   */
+  const createFolderNamed = useCallback(
+    async (name: string, selectAsDestination: boolean): Promise<boolean> => {
+      setCreatingFolder(true)
+      setCreateFolderError(null)
+      try {
+        // Snapshot ids before the mutation lands, so the newly created folder can
+        // be told apart from one that happened to share its name (the server
+        // 409s on duplicates, so this should be impossible, but prefer the id
+        // that wasn't already here if it somehow occurs).
+        const priorIds = new Set(folders.map((f) => f.id))
+        const updated = await createFolder(name)
+        setFolders(updated)
+        if (selectAsDestination) {
+          // Otherwise the user has to create the folder and then click it.
+          const matches = updated.filter((f) => f.name === name)
+          const created = matches.find((f) => !priorIds.has(f.id)) ?? matches.at(-1)
+          if (created) setDestination(created.id)
+        }
+        return true
+      } catch (err: unknown) {
+        // A 409 carries the server's "A folder named X already exists".
+        setCreateFolderError(
+          err instanceof Error ? err.message : "Couldn't create that folder"
+        )
+        return false
+      } finally {
+        setCreatingFolder(false)
+      }
+    },
+    [folders]
+  )
+
+  const handleCreateDestinationFolder = useCallback(
+    (name: string) => createFolderNamed(name, true),
+    [createFolderNamed]
+  )
+
+  const handleCreateFilterFolder = useCallback(
+    (name: string) => createFolderNamed(name, false),
+    [createFolderNamed]
+  )
 
   const handleAssignFolder = useCallback(
     (leadId: string, folderId: string | null) => {
@@ -619,7 +640,7 @@ export default function App() {
                 setPanelState({ destination, destinationChosen: true })
                 setScreen("query")
               }}
-              onCreateFolder={handleCreateFolder}
+              onCreateFolder={handleCreateDestinationFolder}
               creating={creatingFolder}
               createError={createFolderError}
             />
@@ -747,7 +768,7 @@ export default function App() {
             minScore={sliderValue}
             onMinScoreChange={handleMinScoreChange}
             folders={folders}
-            onCreateFolder={handleCreateFolder}
+            onCreateFolder={handleCreateFilterFolder}
             creatingFolder={creatingFolder}
             createFolderError={createFolderError}
           />
