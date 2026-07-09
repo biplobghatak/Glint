@@ -10,6 +10,12 @@ export type ScoreResult = {
   match_score: number
   match_reasons: string[]
   min_score: number
+  /**
+   * Whether a `leads` row exists for this lead. False when the score was
+   * computed but discarded for falling below the user's min_score. The card is
+   * still badged (muted); it is simply not counted and not stored.
+   */
+  stored: boolean
 }
 
 export async function scoreLead(
