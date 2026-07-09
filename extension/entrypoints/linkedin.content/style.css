@@ -128,3 +128,44 @@ button:disabled {
   border: 0;
   font-size: 14px;
 }
+
+/* Run HUD. Mounted by createShadowRootUi(), so these selectors resolve inside
+   the HUD's shadow root and cannot leak onto LinkedIn's page. */
+.glint-hud-card {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  width: 200px;
+  z-index: 2147483000;
+  background: #fff;
+  color: #171717;
+  border: 1px solid #e5e5e5;
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 14%);
+  padding: 12px;
+  font: 400 12px/1.4 system-ui, -apple-system, sans-serif;
+}
+.glint-hud-top { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+.glint-hud-dot { width: 6px; height: 6px; border-radius: 50%; background: #15803d; }
+.glint-hud-title { font-weight: 600; font-size: 11px; }
+.glint-hud-count { font-size: 22px; font-weight: 700; line-height: 1; }
+.glint-hud-muted { color: #737373; font-size: 10px; }
+.glint-hud-status {
+  color: #737373;
+  font-size: 10px;
+  margin: 6px 0 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.glint-hud-stop {
+  width: 100%;
+  border: 1px solid #d4d4d4;
+  background: #fff;
+  color: #404040;
+  border-radius: 6px;
+  font: 600 10px system-ui;
+  padding: 5px 0;
+  cursor: pointer;
+}
+.glint-hud-stop:hover { background: #fafafa; }
