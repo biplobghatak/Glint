@@ -46,7 +46,9 @@ const SORTS: Record<SortKey, { col: "match_score" | "created_at"; asc: boolean }
 }
 
 const LEAD_COLUMNS =
-  "id, name, company, role, linkedin_url, location, country, match_score, match_reasons, status, created_at"
+  "id, name, company, role, linkedin_url, location, country, match_score, match_reasons, status, folder_id, created_at"
+
+type FolderRow = { id: string; name: string; lead_count: number }
 
 const VALID_STATUSES = new Set(["new", "contacted", "ignored"])
 
@@ -61,13 +63,39 @@ interface CommonFilters<T> {
 }
 
 // PostgREST parses `or=(...)` as a grammar: commas separate terms, parentheses
-// group them, and a double quote opens a quoted value. A raw user query
-// containing any of those changes the *shape* of the filter rather than the
-// text being matched, so strip them before interpolation. `%` and `*` are
-// ilike wildcards — a stray one turns a search into "match everything".
+// group them, and a double quote opens a quoted value. Interpolating a raw user
+// query changes the *shape* of the filter rather than the text being matched.
+//
+// Stripping those characters (the previous fix) was safe but wrong: searching
+// `Smith, John` silently became `Smith John`, which matches nothing, and the
+// user is given no hint why. Double-quoting the value makes commas, parens and
+// dots literal, so only `"` and `\` — the quoting characters themselves — need
+// escaping.
+//
+// `%` and `*` stay stripped regardless: they are ilike wildcards, not grammar,
+// and a stray one turns a search into "match everything".
 function sanitizeQuery(q: unknown): string {
   if (typeof q !== "string") return ""
-  return q.replace(/[,()"'\\%*.]/g, " ").replace(/\s+/g, " ").trim().slice(0, 100)
+  return q.replace(/[%*]/g, " ").replace(/\s+/g, " ").trim().slice(0, 100)
+}
+
+// Escape for interpolation inside a PostgREST double-quoted value. Backslash
+// first — escaping it after the quotes would double-escape the backslashes this
+// very step introduces.
+function quoteValue(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+// Three-state, mirroring UNKNOWN_COUNTRY's sentinel convention: null = all
+// folders, "" = unfiled, uuid = that folder. Anything else (a stale id shape, a
+// number, undefined) degrades to "all" rather than to an empty list — a filter
+// that matches nothing is indistinguishable from having no leads.
+function normalizeFolderId(raw: unknown): string | null {
+  if (raw === "") return ""
+  if (typeof raw === "string" && UUID_RE.test(raw)) return raw
+  return null
 }
 
 function clampLimit(limit: unknown): number {
@@ -168,6 +196,7 @@ Deno.serve(async (req: Request) => {
 
   const filter = body.filter ?? {}
   const q = sanitizeQuery(filter.q)
+  const folderId = normalizeFolderId(filter.folderId)
   const { codes, unknown } = normalizeCountries(filter.countries)
   const statuses = Array.isArray(filter.status)
     ? filter.status.filter((s) => VALID_STATUSES.has(s))
@@ -193,7 +222,8 @@ Deno.serve(async (req: Request) => {
     let b = builder.eq("user_id", user_id)
 
     if (q) {
-      b = b.or(`name.ilike.%${q}%,company.ilike.%${q}%,role.ilike.%${q}%`)
+      const v = quoteValue(q)
+      b = b.or(`name.ilike."%${v}%",company.ilike."%${v}%",role.ilike."%${v}%"`)
     }
     if (statuses.length > 0) {
       b = b.in("status", statuses)
@@ -211,10 +241,14 @@ Deno.serve(async (req: Request) => {
     // country filter, and the keyset filter below compose rather than clobber
     // one another.
 
-    // NOTE: filter.folderId is deliberately ignored here. leads.folder_id does
-    // not exist until Phase 2's migration, and naming a missing column makes
-    // PostgREST 400 the whole request. The panel renders the folder control
-    // disabled against this same LeadFilter object until then.
+    // Three states, not two. `null` is "all folders" and applies no predicate;
+    // `""` is "unfiled" and means `folder_id is null`. Collapsing them makes
+    // "All folders" silently show only unfiled leads.
+    if (folderId === "") {
+      b = b.is("folder_id", null)
+    } else if (folderId !== null) {
+      b = b.eq("folder_id", folderId)
+    }
     return b
   }
 
@@ -269,6 +303,21 @@ Deno.serve(async (req: Request) => {
     supabase.from("leads").select("id", { count: "exact", head: true })
   ).lt("match_score", threshold)
 
+  // Shipped alongside the leads so the panel fills its folder <select> in one
+  // round-trip. It also lets the panel notice that its selected folder was
+  // deleted elsewhere, instead of rendering an empty list that reads as
+  // "no leads match".
+  const { data: folderRows } = await supabase.rpc("folders_with_counts", {
+    p_user_id: user_id,
+  })
+  const folders: FolderRow[] = (folderRows ?? []).map(
+    (f: { id: string; name: string; lead_count: number | string }) => ({
+      id: f.id,
+      name: f.name,
+      lead_count: Number(f.lead_count),
+    })
+  )
+
   return new Response(
     JSON.stringify({
       leads: page,
@@ -277,6 +326,7 @@ Deno.serve(async (req: Request) => {
       min_score,
       has_icp,
       target_countries,
+      folders,
     }),
     { headers: jsonHeaders }
   )
