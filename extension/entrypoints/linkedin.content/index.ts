@@ -6,6 +6,7 @@ import { scoreLead, InvalidFolderError } from "@/lib/score"
 import { getRunState, setRunState, clearRunState, type RunState } from "@/lib/run"
 import { sendRuntimeMessage, type RuntimeMessage, type WhichTabMessage, type WhichTabResponse, type EnrichMessage, type EnrichResponse } from "@/lib/messages"
 import { consumeDraft } from "@/lib/draft"
+import { openConnectAndFill } from "@/lib/connect"
 import { buildSearchUrl } from "@/lib/query"
 import { nextAction } from "@/lib/agent-step"
 import { isContactInfoPath, extractContactInfo, CONTACT_INFO_PATH } from "@/lib/contact"
@@ -409,13 +410,27 @@ async function mountDraftCard(ctx: ContentScriptContext): Promise<void> {
   const draft = await consumeDraft(location.pathname)
   if (!draft) return
 
+  // Try to open LinkedIn's Connect dialog and prefill the note. Bounded (a 5s
+  // poll inside), and it must NEVER block or throw into main — connect.ts's
+  // waitFor resolves rather than rejects, but wrap it anyway so a surprise
+  // can't take the profile page down. openConnectAndFill contains no Send/submit
+  // click and never will: the human presses LinkedIn's own Send.
+  let prefilled = false
+  try {
+    prefilled = (await openConnectAndFill(draft.opener)) === "filled"
+  } catch (err) {
+    console.debug("Glint: openConnectAndFill threw", err)
+  }
+
   const ui = await createShadowRootUi<() => void>(ctx, {
     name: DRAFT_CARD_TAG,
     position: "overlay",
     anchor: "body",
-    onMount: (container) => renderDraftCard(container, draft, () => ui.remove()),
-    // renderDraftCard returns its own teardown (it polls for LinkedIn's
-    // composer); dropping it here would leak an interval per dismissed card.
+    onMount: (container) =>
+      renderDraftCard(container, draft, prefilled, () => ui.remove()),
+    // renderDraftCard returns its own teardown (the fallback path polls for
+    // LinkedIn's composer); dropping it here would leak an interval per
+    // dismissed card.
     onRemove: (teardown) => teardown?.(),
   })
   ui.mount()

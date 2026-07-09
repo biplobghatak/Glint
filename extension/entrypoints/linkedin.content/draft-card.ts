@@ -59,10 +59,25 @@ function el<K extends keyof HTMLElementTagNameMap>(
   return node
 }
 
-/** Builds the card and returns a teardown for whatever it left running. */
+/**
+ * Builds the card and returns a teardown for whatever it left running.
+ *
+ * `prefilled` is the outcome of openConnectAndFill() upstream:
+ *  - true  — the opener is already sitting in LinkedIn's Connect note box. The
+ *            card just asks the user to review it and press LinkedIn's own Send.
+ *            No composer affordance is shown; there is nothing to insert.
+ *  - false — the Connect dialog couldn't be opened (no button, or no textarea).
+ *            The card falls back to the copy + insert-into-composer flow, and
+ *            says so.
+ *
+ * Either way Glint never sends: the last action is always a human pressing
+ * LinkedIn's own Send. Plain DOM — this module runs in the content script and
+ * must never pull React in.
+ */
 export function renderDraftCard(
   container: HTMLElement,
   draft: StoredDraft,
+  prefilled: boolean,
   onClose: () => void
 ): () => void {
   const card = el("div", "card")
@@ -110,7 +125,25 @@ export function renderDraftCard(
       // in the card either way.
     }
   })
+  actions.append(copy)
 
+  // The note is already in LinkedIn's Connect box. Nothing to insert — tell the
+  // user to review and press LinkedIn's own Send, and stop. No composer poll.
+  if (prefilled) {
+    card.append(actions)
+    card.append(
+      el(
+        "p",
+        "hint",
+        "Your note is filled into LinkedIn's connect box. Review it and press LinkedIn's Send."
+      )
+    )
+    container.append(card)
+    return () => {}
+  }
+
+  // Fallback: the Connect dialog couldn't be opened. Copy the note, or insert it
+  // into an open message composer. This is a real, working path — not a stub.
   const insert = el("button", "primary", "Insert into composer")
   insert.type = "button"
   insert.addEventListener("click", () => {
@@ -123,9 +156,16 @@ export function renderDraftCard(
     insert.textContent = "Inserted"
     setTimeout(() => (insert.textContent = "Insert into composer"), 1500)
   })
-
-  actions.append(copy, insert)
+  actions.append(insert)
   card.append(actions)
+
+  card.append(
+    el(
+      "p",
+      "fallback-note",
+      "Couldn't open LinkedIn's connect dialog — copy the note instead."
+    )
+  )
 
   // Insert stays disabled until LinkedIn's composer is actually open. Glint
   // never opens it, and never sends — the user reviews the text and presses
