@@ -238,7 +238,7 @@ export default defineContentScript({
   matches: ["*://*.linkedin.com/*"],
   main() {
     let agentActive = false
-    let passiveStarted = false
+    let observerAttached = false
     // True for the whole lifetime of runAgentLoop() on THIS tab, from the
     // moment it's launched until its promise settles. Used to stop the
     // browser.storage.onChanged listener from re-arming passive mode while
@@ -293,10 +293,20 @@ export default defineContentScript({
     // is called both at startup (if there's no run) and whenever a run ends
     // later (agent loop stops itself, or the user clicks Stop) so passive
     // mode resumes.
+    // Attaching the observer must happen exactly once; scanning must happen
+    // every time a run ends. Guarding both with one flag conflated them: a
+    // tab that isn't the run's own calls startPassive() at startup purely to
+    // attach the observer, scan() no-ops because agentActive is true, and the
+    // flag is spent — so when the run ends the re-arm short-circuits and that
+    // tab never badges again until some unrelated DOM mutation happens to
+    // retrigger the observer.
     function startPassive() {
-      if (passiveStarted) return
-      passiveStarted = true
-      observer.observe(document.body, { childList: true, subtree: true })
+      if (!observerAttached) {
+        observerAttached = true
+        observer.observe(document.body, { childList: true, subtree: true })
+      }
+      // scan() is itself gated on agentActive and deduped by `seen`, so
+      // calling it on every transition is safe and idempotent.
       scan(document)
     }
 
