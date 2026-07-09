@@ -181,7 +181,7 @@ Deno.serve(async (req: Request) => {
 
   const { data: icp } = await supabase
     .from("icps")
-    .select("min_score, target_countries")
+    .select("min_score, target_countries, target_roles, company_types")
     .eq("site_id", site_id)
     .maybeSingle()
 
@@ -194,6 +194,11 @@ Deno.serve(async (req: Request) => {
   // sell into. The panel unions it with the countries actually present on the
   // rows it has loaded.
   const target_countries: string[] = icp?.target_countries ?? []
+  // Seed the panel's query-composition chips. Read from the same icps row at
+  // zero extra latency; the panel turns each into a tappable chip that fills the
+  // query box. A null array (generate-icp extracted none) renders as no chips.
+  const target_roles: string[] = icp?.target_roles ?? []
+  const company_types: string[] = icp?.company_types ?? []
 
   const filter = body.filter ?? {}
   const q = sanitizeQuery(filter.q)
@@ -327,6 +332,8 @@ Deno.serve(async (req: Request) => {
       min_score,
       has_icp,
       target_countries,
+      target_roles,
+      company_types,
       folders,
     }),
     { headers: jsonHeaders }

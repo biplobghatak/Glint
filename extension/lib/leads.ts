@@ -39,6 +39,9 @@ export type ListLeadsResponse = {
   min_score: number
   has_icp: boolean
   target_countries: string[]
+  /** ICP columns that seed the query-composition chips, at zero extra latency. */
+  target_roles: string[]
+  company_types: string[]
   /** Shipped with the leads so the folder <select> fills in one round-trip. */
   folders: FolderRow[]
 }
