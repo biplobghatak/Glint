@@ -8,35 +8,36 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 
+type IcpFields = {
+  target_roles: string[]
+  company_types: string[]
+  pain_points: string[]
+  raw_summary: string
+  target_countries: string[]
+}
+
 type IcpDraft = {
   target_roles: string
   company_types: string
   pain_points: string
   raw_summary: string
+  // Carried through from generate-icp rather than edited here. The panel's
+  // country filter is the place this is actually exercised; surfacing a raw
+  // alpha-2 list in onboarding would ask the user to type "DE" from memory.
+  target_countries: string[]
 }
 
-type GenerateIcpResponse =
-  | { needs_manual_input: true }
-  | {
-      target_roles: string[]
-      company_types: string[]
-      pain_points: string[]
-      raw_summary: string
-    }
+type GenerateIcpResponse = { needs_manual_input: true } | IcpFields
 
 type Step = "url" | "manual" | "review" | "error"
 
-function toIcpDraft(data: {
-  target_roles: string[]
-  company_types: string[]
-  pain_points: string[]
-  raw_summary: string
-}): IcpDraft {
+function toIcpDraft(data: IcpFields): IcpDraft {
   return {
     target_roles: data.target_roles.join("\n"),
     company_types: data.company_types.join("\n"),
     pain_points: data.pain_points.join("\n"),
     raw_summary: data.raw_summary,
+    target_countries: data.target_countries ?? [],
   }
 }
 
@@ -59,6 +60,7 @@ export function OnboardingFlow({ userId }: { userId: string }) {
     company_types: "",
     pain_points: "",
     raw_summary: "",
+    target_countries: [],
   })
   const [loading, setLoading] = useState(false)
 
@@ -106,6 +108,15 @@ export function OnboardingFlow({ userId }: { userId: string }) {
     e.preventDefault()
     setLoading(true)
 
+    // icps.user_id is unique — one row per user — so re-running onboarding
+    // UPDATEs the existing row rather than inserting a second one.
+    //
+    // Enumerate columns, and never list min_score here. PostgREST turns this
+    // payload into `on conflict (user_id) do update set <the keys below>`, so
+    // any column named here is overwritten and any column omitted survives.
+    // Adding min_score (or spreading a whole ICP object) would silently reset
+    // the user's score threshold to the column default every time they redo
+    // onboarding — the threshold is theirs, not the LLM's to regenerate.
     const { error } = await supabase.from("icps").upsert(
       {
         user_id: userId,
@@ -114,6 +125,7 @@ export function OnboardingFlow({ userId }: { userId: string }) {
         company_types: toArray(icp.company_types),
         pain_points: toArray(icp.pain_points),
         raw_summary: icp.raw_summary,
+        target_countries: icp.target_countries,
       },
       { onConflict: "user_id" }
     )

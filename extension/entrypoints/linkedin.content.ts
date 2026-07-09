@@ -65,13 +65,26 @@ function badgeColor(score: number): string {
   return "#6b7280"
 }
 
-function injectBadge(node: Element, score: number, reasons: string[]) {
+// A lead scoring below the user's threshold is still scored, still stored, and
+// still badged — muted, not hidden. No badge must always mean "Glint hasn't
+// scored this card", never "Glint scored it low": absence of feedback is
+// indistinguishable from a broken extension, and the user would have no way to
+// tell a filtered-out lead from a crashed content script.
+function injectBadge(
+  node: Element,
+  score: number,
+  reasons: string[],
+  minScore: number
+) {
   try {
     if (node.querySelector(":scope > .glint-badge")) return
+    const belowThreshold = score < minScore
     const b = document.createElement("span")
     b.className = "glint-badge"
     b.textContent = `Glint ${score}`
-    b.title = reasons.join(" • ")
+    b.title = belowThreshold
+      ? `Below your threshold of ${minScore} • ${reasons.join(" • ")}`
+      : reasons.join(" • ")
     b.setAttribute(
       "style",
       [
@@ -82,6 +95,9 @@ function injectBadge(node: Element, score: number, reasons: string[]) {
         "font:600 11px/1.4 system-ui,sans-serif",
         "color:#fff",
         `background:${badgeColor(score)}`,
+        // Muted, not absent. Opacity is the whole difference between "we looked
+        // and this one is weak" and "we never looked".
+        ...(belowThreshold ? ["opacity:0.45"] : []),
         "position:relative",
         "z-index:9999",
       ].join(";")
@@ -226,7 +242,7 @@ async function runAgentLoop(myTabId: number) {
         const fresh = await getRunState()
         if (!fresh || !fresh.active) return
         if (fresh.tabId !== myTabId) return
-        injectBadge(node, result.match_score, result.match_reasons)
+        injectBadge(node, result.match_score, result.match_reasons, result.min_score)
         scoredThisBatch++
         fresh.leadCount++
         await setRunState(fresh)
@@ -379,7 +395,9 @@ export default defineContentScript({
       while (queue.length) {
         const { node, cand } = queue.shift()!
         const result = await scoreLead(cand)
-        if (result) injectBadge(node, result.match_score, result.match_reasons)
+        if (result) {
+          injectBadge(node, result.match_score, result.match_reasons, result.min_score)
+        }
         await new Promise((r) => setTimeout(r, 400))
       }
       draining = false

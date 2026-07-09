@@ -42,8 +42,13 @@ type IcpResult = {
   company_types: string[]
   pain_points: string[]
   raw_summary: string
+  target_countries: string[]
 }
 
+// OpenRouter's strict json_schema with additionalProperties:false requires
+// EVERY property to appear in `required`. target_countries is therefore
+// required-but-possibly-empty rather than optional; an empty array means "no
+// geographic preference", which every consumer reads as "match all countries".
 const ICP_SCHEMA = {
   type: "object",
   properties: {
@@ -51,8 +56,15 @@ const ICP_SCHEMA = {
     company_types: { type: "array", items: { type: "string" } },
     pain_points: { type: "array", items: { type: "string" } },
     raw_summary: { type: "string" },
+    target_countries: { type: "array", items: { type: "string" } },
   },
-  required: ["target_roles", "company_types", "pain_points", "raw_summary"],
+  required: [
+    "target_roles",
+    "company_types",
+    "pain_points",
+    "raw_summary",
+    "target_countries",
+  ],
   additionalProperties: false,
 }
 
@@ -63,10 +75,26 @@ function generateIcp(content: string): Promise<IcpResult> {
     messages: [
       {
         role: "user",
-        content: `Based on this website/product content, identify the ideal customer profile (ICP): target roles who'd buy this, the types of companies that fit, their pain points this product solves, and a short summary.\n\nContent:\n${content}`,
+        content: `Based on this website/product content, identify the ideal customer profile (ICP): target roles who'd buy this, the types of companies that fit, their pain points this product solves, and a short summary.
+
+Also return target_countries: the countries this product sells into, as ISO-3166 alpha-2 codes (e.g. US, GB, DE). Return an empty array unless the content names specific markets — an empty array means "sells everywhere", and inventing countries would silently filter real leads out of the user's list.
+
+Content:\n${content}`,
       },
     ],
   })
+}
+
+// The model is told to emit alpha-2 codes but the schema only constrains the
+// type. Drop anything that isn't exactly two letters, and dedupe: a bad code
+// here becomes a country filter that matches nothing.
+export function normalizeCountries(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return []
+  const codes = raw
+    .filter((c): c is string => typeof c === "string")
+    .map((c) => c.trim().toUpperCase())
+    .filter((c) => /^[A-Z]{2}$/.test(c))
+  return Array.from(new Set(codes))
 }
 
 export async function handler(req: Request): Promise<Response> {
@@ -94,7 +122,11 @@ export async function handler(req: Request): Promise<Response> {
 
   try {
     const icp = await generateIcp(content)
-    return new Response(JSON.stringify(icp), {
+    const normalized: IcpResult = {
+      ...icp,
+      target_countries: normalizeCountries(icp.target_countries),
+    }
+    return new Response(JSON.stringify(normalized), {
       headers: { ...corsHeaders, "content-type": "application/json" },
     })
   } catch (err) {
