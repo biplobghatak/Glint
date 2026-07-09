@@ -11,6 +11,7 @@ type ProfileData = {
   name?: string
   headline?: string
   company?: string
+  location?: string
   post_text?: string
   linkedin_url?: string
   source?: "extension" | "profile" | "post" | "search_result"
@@ -21,27 +22,55 @@ type Icp = {
   company_types: string[] | null
   pain_points: string[] | null
   raw_summary: string | null
+  min_score: number
 }
 
 type ScoreResult = {
   match_score: number
   match_reasons: string[]
+  country: string | null
 }
 
+// OpenRouter's strict json_schema with additionalProperties:false requires
+// EVERY property to appear in `required`. An optional field is therefore
+// modelled as a nullable type, never by omission from `required` — leaving
+// `country` out would be rejected outright rather than treated as optional.
 const SCORE_SCHEMA = {
   type: "object",
   properties: {
     match_score: { type: "integer", minimum: 0, maximum: 100 },
     match_reasons: { type: "array", items: { type: "string" } },
+    country: { type: ["string", "null"] },
   },
-  required: ["match_score", "match_reasons"],
+  required: ["match_score", "match_reasons", "country"],
   additionalProperties: false,
+}
+
+// Mirrors icps.min_score's column default. Used only when a user somehow has no
+// icps row on a code path that must still answer (the dedup branch).
+const DEFAULT_MIN_SCORE = 70
+
+// The schema constrains `country` to string-or-null, not to a valid alpha-2
+// code, so the model can still hand back "USA", "us", or a sentence. Anything
+// that isn't exactly two letters becomes null: a wrong country silently
+// misfiles a lead under a filter the user trusts, while null lands it in the
+// "Unknown" chip that is on by default.
+function normalizeCountry(raw: string | null | undefined): string | null {
+  if (typeof raw !== "string") return null
+  const c = raw.trim().toUpperCase()
+  return /^[A-Z]{2}$/.test(c) ? c : null
 }
 
 function scorePrompt(icp: Icp, profile: ProfileData): string {
   return [
     "You score how well a LinkedIn lead matches a seller's ideal customer profile (ICP).",
     "Return a match_score from 0-100 (100 = perfect fit) and 2-4 short match_reasons.",
+    "",
+    "Also return `country`: the lead's country as an ISO-3166 alpha-2 code (e.g. US, GB, DE),",
+    "inferred from their location line. LinkedIn writes regions, not countries — map",
+    '"Greater Seattle Area" to US, "Berlin, Germany" to DE. If the location is missing,',
+    "ambiguous, or names no country you can identify, return null. Do not guess from the",
+    "person's name, company, or language.",
     "",
     "ICP:",
     `- Target roles: ${(icp.target_roles ?? []).join(", ") || "n/a"}`,
@@ -53,6 +82,7 @@ function scorePrompt(icp: Icp, profile: ProfileData): string {
     `- Name: ${profile.name ?? "n/a"}`,
     `- Headline/role: ${profile.headline ?? "n/a"}`,
     `- Company: ${profile.company ?? "n/a"}`,
+    `- Location: ${profile.location ?? "n/a"}`,
     `- Post/context: ${profile.post_text ?? "n/a"}`,
   ].join("\n")
 }
@@ -113,11 +143,28 @@ Deno.serve(async (req: Request) => {
       .maybeSingle()
 
     if (existing) {
+      // This branch returns before the LLM is ever called — which is why a lead
+      // scored before the country migration never gets `country` backfilled by
+      // ordinary browsing. Do NOT "fix" that by scoring here; re-scoring every
+      // already-seen card is precisely the cost this branch exists to avoid.
+      //
+      // min_score still has to come back, though: the content script gates the
+      // badge on it, and a deduped card must be badged identically to a
+      // freshly-scored one. Fetched separately rather than by hoisting the icps
+      // read above this branch, because that would start returning 404 no_icp
+      // for deduped leads that today return 200.
+      const { data: icpRow } = await supabase
+        .from("icps")
+        .select("min_score")
+        .eq("user_id", user_id)
+        .maybeSingle()
+
       return new Response(
         JSON.stringify({
           lead_id: existing.id,
           match_score: existing.match_score,
           match_reasons: existing.match_reasons,
+          min_score: icpRow?.min_score ?? DEFAULT_MIN_SCORE,
         }),
         { headers: jsonHeaders }
       )
@@ -126,7 +173,7 @@ Deno.serve(async (req: Request) => {
 
   const { data: icp, error: icpError } = await supabase
     .from("icps")
-    .select("target_roles, company_types, pain_points, raw_summary")
+    .select("target_roles, company_types, pain_points, raw_summary, min_score")
     .eq("user_id", user_id)
     .maybeSingle()
 
@@ -166,6 +213,8 @@ Deno.serve(async (req: Request) => {
       company: profile_data.company ?? null,
       role: profile_data.headline ?? null,
       linkedin_url: profile_data.linkedin_url ?? null,
+      location: profile_data.location ?? null,
+      country: normalizeCountry(score.country),
       post_context: profile_data.post_text ?? null,
       match_score: score.match_score,
       match_reasons: score.match_reasons,
@@ -186,6 +235,7 @@ Deno.serve(async (req: Request) => {
       lead_id: inserted.id,
       match_score: score.match_score,
       match_reasons: score.match_reasons,
+      min_score: (icp as Icp).min_score ?? DEFAULT_MIN_SCORE,
     }),
     { headers: jsonHeaders }
   )

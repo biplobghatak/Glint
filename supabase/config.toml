@@ -436,3 +436,19 @@ enabled = true
 verify_jwt = false
 import_map = "./functions/parse-search-query/deno.json"
 entrypoint = "./functions/parse-search-query/index.ts"
+
+# list-leads and update-icp are called by the side panel, which authenticates
+# with an opaque device_token and never holds a Supabase JWT. Both resolve
+# user_id server-side from extension_pairings and fail closed on a revoked
+# pairing, so JWT verification is disabled the same way score-lead's is.
+[functions.list-leads]
+enabled = true
+verify_jwt = false
+import_map = "./functions/list-leads/deno.json"
+entrypoint = "./functions/list-leads/index.ts"
+
+[functions.update-icp]
+enabled = true
+verify_jwt = false
+import_map = "./functions/update-icp/deno.json"
+entrypoint = "./functions/update-icp/index.ts"

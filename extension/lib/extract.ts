@@ -2,6 +2,11 @@ export type LeadCandidate = {
   name: string | null
   headline: string | null
   company: string | null
+  // The raw subline off the card ("Berlin, Germany", "Greater Seattle Area").
+  // Never normalized here: score-lead's LLM derives the ISO-3166 country from
+  // it server-side, because no lookup table we could ship maps "Greater
+  // Seattle Area" to US.
+  location: string | null
   post_text: string | null
   linkedin_url: string | null
   source: "profile" | "post" | "search_result"
@@ -228,6 +233,49 @@ function extractHeadlineFromCard(node: Element, name: string | null): string | n
   return null
 }
 
+// Whether a line could be a location subline. Deliberately looser than
+// looksLikeLocationLine() above, which demands a comma because it is used to
+// *skip* lines while hunting for the headline (a false negative there merely
+// costs a headline). Here a false negative costs the location outright, and
+// plenty of real LinkedIn locations carry no comma at all ("Greater Seattle
+// Area", "Singapore"). Digits, " at ", "@" and "|" still mark a headline or a
+// stat line rather than a place.
+function looksLikeLocationText(line: string): boolean {
+  const l = line.trim()
+  if (l.length < 2 || l.length > 60) return false
+  if (isDegreeLine(l) || isButtonLabelLine(l)) return false
+  if (/\d/.test(l)) return false
+  if (/\bat\b|@|\|/i.test(l)) return false
+  return true
+}
+
+// Structural fallback for the location: the line following the headline, in
+// the card's visual line order (name → headline → location). Anything that
+// fails looksLikeLocationText is treated as "no location" rather than guessed
+// at — location only ever feeds the LLM prompt that derives `country`, so a
+// null costs one lead's country while junk would poison it.
+function extractLocationFromCard(
+  node: Element,
+  name: string | null,
+  headline: string | null
+): string | null {
+  if (!name || !headline) return null
+  const innerText = (node as HTMLElement).innerText
+  if (!innerText) return null
+  const lines = innerText
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0)
+  const headlineIdx = lines.findIndex((l) => l.startsWith(headline))
+  if (headlineIdx === -1) return null
+  for (let i = headlineIdx + 1; i < lines.length; i++) {
+    const line = lines[i]
+    if (isDegreeLine(line) || isButtonLabelLine(line)) continue
+    return looksLikeLocationText(line) ? line : null
+  }
+  return null
+}
+
 // Structural fallback for company: parsed out of the headline, the text
 // after " at " or " @ ", cut at the first "|" (LinkedIn headlines often
 // chain extra context after a pipe).
@@ -266,6 +314,8 @@ export function extractFromNode(node: Element): LeadCandidate | null {
         name,
         headline,
         company: null,
+        // Feed posts render no location subline anywhere on the update.
+        location: null,
         post_text,
         linkedin_url,
         source: "post",
@@ -289,8 +339,20 @@ export function extractFromNode(node: Element): LeadCandidate | null {
       let headline = text(node.querySelector(".entity-result__primary-subtitle"))
       if (!headline) headline = extractHeadlineFromCard(node, name)
 
-      let company = text(node.querySelector(".entity-result__secondary-subtitle"))
+      // .entity-result__secondary-subtitle is the *location* subline on
+      // people-search cards, not the company — company lives inside the
+      // headline ("CEO at Acme"). This node was previously read straight into
+      // `company`, which is why company sometimes held "San Francisco Bay
+      // Area". Disambiguate by content rather than trusting either reading:
+      // whichever field the text actually looks like is the field it fills.
+      const secondary = text(node.querySelector(".entity-result__secondary-subtitle"))
+      const secondaryIsLocation = secondary !== null && looksLikeLocationText(secondary)
+
+      let company = secondaryIsLocation ? null : secondary
       if (!company) company = extractCompanyFromHeadline(headline)
+
+      let location = secondaryIsLocation ? secondary : null
+      if (!location) location = extractLocationFromCard(node, name, headline)
 
       const linkedin_url = firstProfileLink(node)
       if (!name) return null
@@ -298,6 +360,7 @@ export function extractFromNode(node: Element): LeadCandidate | null {
         name,
         headline,
         company,
+        location,
         post_text: null,
         linkedin_url,
         source: "search_result",
