@@ -91,7 +91,36 @@ export const marketingCss = `
   font-size: clamp(1rem, 1.35vw, 1.16rem); line-height: 1.62;
   color: var(--fog); max-width: 40ch; margin: 0 0 34px;
 }
-.gl-cta-row { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 30px; }
+.gl-cta-row { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 22px; }
+
+/* Deliberately quieter than the CTA row: a download is the second thing you
+   want, after an account. Loud enough to find, never competing with Start. */
+.gl-get { margin: 0 0 28px; }
+.gl-get-row { display: flex; align-items: baseline; gap: 10px; margin: 0; flex-wrap: wrap; }
+.gl-get-link {
+  display: inline-flex; align-items: baseline; gap: 8px;
+  font-size: 14px; font-weight: 500; color: var(--snow);
+  text-decoration: none;
+  transition: color 140ms ease;
+}
+/* Underline the words, not the arrow — and not the size chip beside it. */
+.gl-get-label {
+  border-bottom: 1px solid rgba(55,208,126,0.35);
+  padding-bottom: 2px;
+  transition: border-color 140ms ease;
+}
+.gl-get-link:hover { color: var(--green); }
+.gl-get-link:hover .gl-get-label { border-bottom-color: var(--green); }
+.gl-get-link:focus-visible {
+  outline: 2px solid var(--green); outline-offset: 3px; border-radius: 2px;
+}
+.gl-get-arrow { color: var(--green); font-size: 15px; line-height: 1; }
+.gl-get-size { font-size: 11.5px; color: var(--fog); letter-spacing: 0.02em; }
+/* 44ch keeps the hint to two balanced lines instead of orphaning "on." */
+.gl-get-note {
+  margin: 9px 0 0; font-size: 11.5px; color: var(--fog);
+  line-height: 1.55; max-width: 44ch;
+}
 
 .gl-trust { list-style: none; display: flex; flex-wrap: wrap; gap: 8px 22px; margin: 0; padding: 0; }
 .gl-trust-item { display: inline-flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--fog); }

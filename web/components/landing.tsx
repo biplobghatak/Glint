@@ -12,6 +12,10 @@ type Lead = {
   step: number
 }
 
+// Served straight out of web/public. A stable path, not a versioned filename:
+// the hero must never link at a build that a later `wxt zip` has replaced.
+const EXTENSION_ZIP = "/glint-extension.zip"
+
 // Illustrative hero stream — a spread of scores so the range reads at a glance.
 const STREAM: Lead[] = [
   { initials: "PN", name: "Priya N.", headline: "VP Sales · Series B SaaS", score: 92, step: 0 },
@@ -208,6 +212,29 @@ export function Landing() {
               <Button asChild variant="outline">
                 <a href="#how">See how it works</a>
               </Button>
+            </div>
+            {/* The build is unpacked and unsigned, so it cannot be installed by
+                opening the file. Saying so here costs a line and saves the
+                download from being a dead end. `chrome://extensions` is not a
+                link on purpose: Chrome refuses to navigate to it from a page. */}
+            <div className="gl-get">
+              <p className="gl-get-row">
+                <a className="gl-get-link" href={EXTENSION_ZIP} download>
+                  <span className="gl-get-arrow" aria-hidden>
+                    ↓
+                  </span>
+                  <span className="gl-get-label">
+                    Download the Chrome extension
+                  </span>
+                </a>
+                {/* Outside the anchor: the size describes the download, it is
+                    not part of what you click. */}
+                <span className="gl-mono gl-get-size">zip · 108 KB</span>
+              </p>
+              <p className="gl-get-note gl-mono">
+                Unzip, then load the folder at chrome://extensions with
+                Developer mode on.
+              </p>
             </div>
             <ul className="gl-trust">
               {TRUST.map((t) => (
