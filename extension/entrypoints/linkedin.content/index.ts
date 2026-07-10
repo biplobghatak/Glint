@@ -233,6 +233,32 @@ const SCANNING_CLASS = "glint-scanning"
 let warnedAboutNoCards = false
 
 /**
+ * True once this document is on its way out — because the run navigated it to
+ * the next page, or because anything else unloaded it.
+ *
+ * Chrome fires `visibilitychange` with `document.hidden` as a step of unloading
+ * a document, BEFORE `pagehide`. Without this flag the run's own pagination
+ * reads its own unload as "the run window was hidden", pauses, and the next
+ * page auto-resumes into a re-navigation — a reload loop that never advances
+ * past the page it is leaving.
+ */
+let navigatingAway = false
+
+/**
+ * How long a page must STAY hidden before the run treats it as a real
+ * `hidden` pause.
+ *
+ * A document being unloaded never lives long enough to run this timer, which is
+ * what makes it the reliable half of the guard: `navigatingAway` catches the
+ * navigations Glint itself issues, and this catches every other unload (the
+ * user hitting reload, following a link, closing the tab). It also absorbs a
+ * flick to another tab and back, which a run should ride out rather than pause
+ * for. Short enough that a genuine minimize still pauses before the first
+ * throttled timer would have mattered.
+ */
+const HIDDEN_PAUSE_GRACE_MS = 400
+
+/**
  * Scans exactly one results page, then hands the decision back to nextAction().
  *
  * Stateless by construction: everything it remembers lives in RunState, so a
@@ -478,6 +504,10 @@ async function runPageStep(myTabId: number, hud: HudHandle) {
       phase: "scanning",
     }
     await setRunState(next)
+    // Set BEFORE the message: the navigation it asks for will unload this
+    // document, and the visibilitychange that unload fires must not be mistaken
+    // for the user hiding the window. See navigatingAway.
+    navigatingAway = true
     // The background owns tab navigation -- it already does for startRun, and
     // reconcileRunState() watches chrome.tabs.onUpdated to notice a run tab
     // leaving LinkedIn. Two owners would make that reconciliation lie.
@@ -858,17 +888,44 @@ export default defineContentScript({
       else hudHandle?.hud.update({ status: "Paused" })
     })
 
+    let hiddenPauseTimer: ReturnType<typeof setTimeout> | undefined
+
+    // An unload hides the document on its way out, so `pagehide` is the signal
+    // that this visibilitychange is a death rattle rather than the user hiding
+    // the window. It fires AFTER visibilitychange, which is exactly why the
+    // pause below is delayed rather than immediate: a dying document never
+    // reaches the timer.
+    window.addEventListener("pagehide", () => {
+      navigatingAway = true
+      clearTimeout(hiddenPauseTimer)
+    })
+
     // The single signal every Chrome throttle keys off. Pausing here is not a
     // nicety: a hidden page's timers are clamped to one wake-up per minute after
     // five minutes, and its IntersectionObserver stops firing, so LinkedIn's
     // lazily-rendered cards may never appear. Reporting it lets the run stop
     // cleanly at a card boundary rather than wedge mid-page.
+    //
+    // But it fires on unload too, and a run that pauses itself every time it
+    // turns a page will auto-resume into a re-navigation on the next page and
+    // reload forever. So a hidden page must still BE hidden a moment later, and
+    // must not be one this run is deliberately navigating away from.
     document.addEventListener("visibilitychange", () => {
       if (!agentActive) return
-      const state = latestRunState
       if (document.hidden) {
-        if (state?.status === "running") pauseRun("hidden")
-      } else if (state?.status === "paused" && state.pauseReason === "hidden") {
+        if (navigatingAway) return
+        clearTimeout(hiddenPauseTimer)
+        hiddenPauseTimer = setTimeout(() => {
+          // Re-read both: the run may have ended, and the page may have come
+          // back, during the grace period.
+          if (!document.hidden || navigatingAway) return
+          if (latestRunState?.status === "running") pauseRun("hidden")
+        }, HIDDEN_PAUSE_GRACE_MS)
+        return
+      }
+      clearTimeout(hiddenPauseTimer)
+      const state = latestRunState
+      if (state?.status === "paused" && state.pauseReason === "hidden") {
         // Auto-resume, and only from the pause the user did not choose.
         sendMessage({ type: "RESUME_RUN" })
       }

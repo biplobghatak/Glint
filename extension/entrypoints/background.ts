@@ -334,8 +334,14 @@ async function resumeRun(): Promise<void> {
 
   const url = buildSearchUrl(state.parsed, state.page)
   const tab = await chrome.tabs.get(state.tabId).catch(() => null)
+  // `url` is the COMMITTED url; a tab mid-navigation still reports the page it
+  // is leaving, and only `pendingUrl` names the one it is going to. Judging a
+  // resume by the committed url alone re-navigates a tab that is already on its
+  // way to exactly the right page — and since that navigation unloads a
+  // document, which pauses the run again, the two feed each other.
+  const destination = tab?.pendingUrl ?? tab?.url
 
-  if (!tab || tab.discarded || !isLinkedIn(tab.url)) {
+  if (!tab || tab.discarded || !isLinkedIn(destination)) {
     // The tab is gone, was discarded by Chrome's memory saver, or the user
     // navigated it off LinkedIn. A tab that still exists is reloaded in place —
     // navigating it is what un-discards it — and only a vanished one costs a new
@@ -365,7 +371,7 @@ async function resumeRun(): Promise<void> {
   // was paused. Send it back. Ordering matches startRun's: the state is already
   // `running`, so the content script that loads on arrival finds a run to drive.
   // A failure here is recoverable — the run stays paused-able and Resume retries.
-  if (!isRunPage(state.parsed, state.page, tab.url ?? "")) {
+  if (!isRunPage(state.parsed, state.page, destination ?? "")) {
     try {
       await chrome.tabs.update(state.tabId, { url })
     } catch (err) {
